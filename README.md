@@ -103,10 +103,45 @@ python evaluate.py --data data/celeba64 --out runs/eval \
    得到与 VAE 同口径的重建指标，反映"生成器能覆盖多少真实图像"。
 4. **FID**：分布级指标，越低越好；需要 ≥1000 张样本，且依赖 ImageNet 预训练的 Inception。
 
-## 4. 一键跑
+## 4. 跑起来
+
+### 4.1 先冒烟测试（强烈建议）
+
+换一台新机器（尤其是服务器）先跑这个，确认环境、数据、模型、评估四条链路都通：
+
+```bash
+bash smoke_test.sh
+```
+
+它只训练几十步，几分钟结束，会依次检查：
+
+1. torch / torchvision / CUDA 是否可用，显卡型号和显存
+2. 数据能否读出来、形状和 dtype 是否正确、有没有 preview.png
+3. DataLoader 多进程是否被环境限制（被禁则自动降级为 `num_workers=0`）
+4. DCGAN 能否前向+反向、能否存检查点
+5. ConvVAE 能否前向+反向、能否存检查点
+6. 评估脚本能否跑完并产出所有图
+
+全部通过会打印「冒烟测试通过」，产物在 `_smoke/`，看完直接 `rm -rf _smoke`。
+
+可调参数（都是环境变量）：
+
+```bash
+N=5000 STEPS=200 bash smoke_test.sh    # 多看一点
+SIZE=128 bash smoke_test.sh            # 顺便验证 128 分辨率
+WORKERS=4 bash smoke_test.sh           # 强制多进程（默认自动探测）
+DATA_SRC=./img_align_celeba bash smoke_test.sh   # 用已解压的图片目录
+PY=/path/to/python bash smoke_test.sh  # 指定解释器
+```
+
+> 冒烟测试只跑几十步，`results.json` 里的 PSNR/SSIM **没有参考意义**，只能证明流程通。
+
+### 4.2 正式训练
 
 ```bash
 bash run_all.sh            # 数据准备(5k 子集) -> 训练 -> 评估
+FULL=1 bash run_all.sh     # 全量数据 + 30 epoch
+EPOCHS=50 BATCH=128 bash run_all.sh
 ```
 
 ## 5. 预期结果（64x64，30 epoch 量级，供对照）
