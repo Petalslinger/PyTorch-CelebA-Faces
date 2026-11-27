@@ -344,6 +344,22 @@ def main() -> None:
         summary["VAE-prior-NN"] = {
             "psnr": summarize(nn_v["psnr"]), "ssim": summarize(nn_v["ssim"])
         }
+        # 先验采样的多样性：与重建多样性不同，这里衡量的是"能不能生成不同的图"。
+        # 后验塌缩时这个值同样会接近 0，即使重建指标还行。
+        p_chk = min(16, prior.size(0))
+        p_spread = _mean_pairwise_absdiff(prior[:p_chk])
+        p_gt_spread = _mean_pairwise_absdiff(gt[:p_chk])
+        p_ratio = p_spread / p_gt_spread if p_gt_spread > 0 else float("nan")
+        summary["VAE-prior-NN"]["diversity"] = {
+            "gen_spread": round(p_spread, 6),
+            "gt_spread": round(p_gt_spread, 6),
+            "ratio": round(p_ratio, 4),
+        }
+        print(f"      先验采样多样性: {p_spread:.4f} / 真实图 {p_gt_spread:.4f} = "
+              f"{p_ratio * 100:.1f}%")
+        if p_ratio < 0.10:
+            print("      [警告] 先验采样多样性低于真实图的 10%：解码器只会输出"
+                  "同一个结果，后验已塌缩。")
         print(f"      VAE 先验采样(最近邻): PSNR={nn_v['psnr'].mean():.2f}dB  "
               f"SSIM={nn_v['ssim'].mean():.4f}")
         results["metrics"]["vae"] = {
