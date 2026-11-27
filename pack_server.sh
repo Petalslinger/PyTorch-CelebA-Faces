@@ -98,10 +98,10 @@ if [[ "${1:-}" == "--tar" ]]; then
   tar -czf server_bundle.tar.gz -C . "$DEST"
   ls -lh server_bundle.tar.gz | awk '{print "   server_bundle.tar.gz  " $5}'
   echo
-  echo "   上传：scp server_bundle.tar.gz user@server:~/"
-  echo "   解压：ssh user@server 'tar -xzf server_bundle.tar.gz'"
+  echo "   上传：scp server_bundle.tar.gz root@你的实例IP:/root/autodl-tmp/"
+  echo "   解压：ssh root@你的实例IP 'cd /root/autodl-tmp && tar -xzf server_bundle.tar.gz'"
 else
   echo
-  echo "   上传：scp -r ${DEST} user@server:~/celeba"
+  echo "   上传：scp -r ${DEST} root@你的实例IP:/root/autodl-tmp/"
   echo "   或先打包：bash pack_server.sh --tar"
 fi
