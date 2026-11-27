@@ -4,6 +4,8 @@
 与 GAN 的对比是这次实验的重点，所以这里特意把几处细节写清楚：
 
   * 重建损失：默认用 MSE（对应高斯似然），也可以换成 L1 或 BCE；
+    **对像素求和**（不是求平均），这样它与同样"求和"的 KL 项才是同一个量纲下的
+    ELBO 两项——详见 recon_loss_per_sample 的注释；
   * KL 项：逐维求和后按 batch 平均，beta 控制权衡；
   * 支持 KL warm-up（先重建、后加 KL），避免后验塌缩（posterior collapse）；
   * 前向返回 (recon, mu, logvar, z)，其中 z = mu + eps*std 只在训练时采样，
@@ -150,11 +152,18 @@ class ConvVAE(nn.Module):
     def recon_loss_per_sample(
         recon: torch.Tensor, target: torch.Tensor, kind: str = "mse"
     ) -> torch.Tensor:
-        """逐样本重建损失（对像素求平均后乘以通道数），返回 [B]。"""
+        """逐样本重建损失（对像素求和），返回 [B]。
+
+        量纲必须与 KL 对齐：kl_per_sample 是对 latent 维**求和**，
+        64x64x3 的图若重建项只求平均，量级约 0.01~0.9，而 KL 是 1~100，
+        于是 beta*KL 完全主导，优化器的最优解就是令 mu=0、logvar=0
+        （后验塌缩），解码器退化成与输入无关的"平均脸"。
+        这正是第一次训练 20 轮后 8 张重建图两两差异为 0 的原因。
+        """
         if kind == "mse":
-            return (recon - target).pow(2).flatten(1).mean(dim=1) * recon.size(1)
+            return (recon - target).pow(2).flatten(1).sum(dim=1)
         if kind == "l1":
-            return (recon - target).abs().flatten(1).mean(dim=1) * recon.size(1)
+            return (recon - target).abs().flatten(1).sum(dim=1)
         if kind == "bce":
             # 把 [-1,1] 映到 (0,1) 再算二元交叉熵
             r = (recon + 1) * 0.5
@@ -162,6 +171,30 @@ class ConvVAE(nn.Module):
             return F.binary_cross_entropy(r.clamp(1e-6, 1 - 1e-6), t, reduction="none") \
                 .flatten(1).sum(dim=1)
         raise ValueError(f"未知重建损失: {kind}")
+
+
+def elbo_loss(
+    recon: torch.Tensor,
+    target: torch.Tensor,
+    mu: torch.Tensor,
+    logvar: torch.Tensor,
+    beta: float = 1.0,
+    kind: str = "mse",
+    n_px: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """VAE 的 (总损失, 重建项, KL 项)，返回的都是逐样本 [B]。
+
+    两项统一按"对像素求和"的口径计算后再同时除以 n_px：
+    除以同一个常数不改变两项的相对权重与最优解，但能让数值回到 O(1)，
+    AMP 下 fp16 不会溢出、固定阈值的梯度裁剪也才有意义。
+
+    **必须同时除以 n_px**。若只把重建项除以像素数、KL 保持求和，
+    就回到了"KL 比重建项大三个数量级"的塌缩配置。
+    """
+    n_px = int(n_px or target[0].numel())
+    rec = ConvVAE.recon_loss_per_sample(recon, target, kind) / n_px
+    kl = ConvVAE.kl_per_sample(mu, logvar) / n_px
+    return rec + beta * kl, rec, kl
 
 
 def build_vae(hparams: dict) -> ConvVAE:
