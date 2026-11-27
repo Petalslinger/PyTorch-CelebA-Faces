@@ -1,20 +1,32 @@
-"""把 Kaggle 的 CelebA 压缩包（jpg）预处理成训练用的 .npy 数组。
+"""把 CelebA 原始数据预处理成训练用的 .npy 数组。
 
 为什么先转 npy：
   * CelebA 有 20 万张 jpg，每次训练都解码 jpg 会浪费大量 CPU；
   * 统一尺寸（默认 64x64）后一个 split 只有 0.5~2 GB，可以 mmap 读取；
   * 训练脚本就只需要 numpy + torch，不依赖 torchvision 的 ImageFolder。
 
-用法
-----
-    # 1) 从 zip 直接转换（自动识别 img_align_celeba/img_align_celeba/*.jpg）
-    python prepare_data.py --zip archive.zip --out data/celeba64 --size 64
+支持三种数据来源
+----------------
+1) 官方目录结构（AutoDL 的 /root/autodl-pub/CelebA 就是这种）::
 
-    # 2) 已经是解压好的文件夹
-    python prepare_data.py --src ./img_align_celeba --out data/celeba64 --size 64
+       CelebA/
+       ├── Anno/  list_attr_celeba.txt ...
+       ├── Eval/  list_eval_partition.txt      ← 官方划分
+       └── Img/
+           ├── img_align_celeba/000001.jpg ...  ← 已解压
+           └── img_align_celeba.zip             ← 或者还没解压
 
-    # 3) 先小规模试跑（只取 5000 张训练图）
-    python prepare_data.py --zip archive.zip --out data/celeba64_5k --size 64 --max-images 5000
+   这时只要给根目录，脚本自动找图片和划分表：
+
+       python prepare_data.py --root /root/autodl-pub/CelebA --out data/celeba64
+
+2) Kaggle 版 archive.zip（内部是 img_align_celeba/img_align_celeba/*.jpg）::
+
+       python prepare_data.py --zip archive.zip --out data/celeba64 --size 64
+
+3) 已经解压好的图片文件夹::
+
+       python prepare_data.py --src ./img_align_celeba --out data/celeba64 --size 64
 
 输出目录结构::
 
@@ -24,6 +36,10 @@
         test.npy
         meta.json     # 尺寸、数量、划分来源、预处理参数
         preview.png   # 64 张训练样本预览，检查预处理是否正常
+
+先用 --dry-run 看一眼检测结果，不实际转换::
+
+    python prepare_data.py --root /root/autodl-pub/CelebA --out /tmp/x --dry-run
 """
 from __future__ import annotations
 
@@ -45,6 +61,32 @@ from PIL import Image
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 SPLIT_NAMES = {0: "train", 1: "val", 2: "test"}
+
+# 官方目录结构里，图片可能出现在这些位置（按优先级）
+_IMG_DIR_CANDIDATES = [
+    "Img/img_align_celeba",
+    "img_align_celeba",
+    "Img/img_align_celeba_png",
+    "img_align_celeba_png",
+]
+_ZIP_CANDIDATES = [
+    "Img/img_align_celeba.zip",
+    "img_align_celeba.zip",
+]
+_SEVENZ_CANDIDATES = [
+    "Img/img_align_celeba.7z",
+    "img_align_celeba.7z",
+    "Img/img_celeba.7z",
+    "img_celeba.7z",
+]
+_PARTITION_CANDIDATES = [
+    "Eval/list_eval_partition.txt",
+    "Eval/list_eval_partition.csv",
+    "list_eval_partition.txt",
+    "list_eval_partition.csv",
+    "Anno/list_eval_partition.txt",
+    "Anno/list_eval_partition.csv",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -94,7 +136,75 @@ def _worker(task: Tuple[str, str, int, bool]) -> Optional[np.ndarray]:
 
 
 # --------------------------------------------------------------------------- #
-# 收集图片列表 & 官方划分
+# 数据来源探测
+# --------------------------------------------------------------------------- #
+
+
+def _non_empty_dir(p: Path) -> bool:
+    try:
+        return p.is_dir() and next(p.iterdir(), None) is not None
+    except OSError:
+        return False
+
+
+def _detect_image_source(root: Path) -> Tuple[str, bool, str]:
+    """在官方目录结构里找图片源，返回 (路径, 是否zip, 人类可读描述)。"""
+    for rel in _IMG_DIR_CANDIDATES:
+        p = root / rel
+        if _non_empty_dir(p):
+            return str(p), False, f"文件夹 {rel}/"
+
+    for rel in _ZIP_CANDIDATES:
+        p = root / rel
+        if p.is_file():
+            return str(p), True, f"压缩包 {rel}（无需解压，直接读）"
+
+    # 兜底：在浅层递归里找，兼容 root 指到 Img/ 或上一层的情况
+    for name, want_zip in (("img_align_celeba", False), ("img_align_celeba.zip", True)):
+        for hit in sorted(root.rglob(name)):
+            if (want_zip and hit.is_file()) or (not want_zip and _non_empty_dir(hit)):
+                try:
+                    rel = hit.relative_to(root)
+                except ValueError:
+                    rel = hit
+                return str(hit), want_zip, f"自动发现 {rel}"
+
+    for rel in _SEVENZ_CANDIDATES:
+        p = root / rel
+        if p.exists():
+            raise RuntimeError(
+                f"找到 {rel}，但这是 7z 格式，脚本不直接支持。\n"
+                f"请先解压（需要约 1.5 GB 磁盘）：\n"
+                f"    mkdir -p {root / 'Img'}/img_align_celeba\n"
+                f"    cd {root / 'Img'}/img_align_celeba && 7z x ../{Path(rel).name}\n"
+                f"（没有 7z 命令的话：pip install py7zr && python -m py7zr x ../{Path(rel).name}）\n"
+                f"解压后再运行本脚本即可。"
+            )
+
+    # 最后一种可能：root 本身就是图片目录
+    if _non_empty_dir(root) and any(
+        p.suffix.lower() in IMG_EXTS for p in root.iterdir() if p.is_file()
+    ):
+        return str(root), False, "根目录本身就是图片目录"
+
+    raise RuntimeError(
+        f"在 {root} 下没找到图片。\n"
+        f"期望的结构是 {root}/Img/img_align_celeba/*.jpg 或 {root}/Img/img_align_celeba.zip，\n"
+        f"也可以用 --zip / --src 直接指定。"
+    )
+
+
+def _find_partition_file(root: Path) -> Optional[Path]:
+    for rel in _PARTITION_CANDIDATES:
+        p = root / rel
+        if p.is_file():
+            return p
+    hits = sorted(root.rglob("list_eval_partition.*"))
+    return hits[0] if hits else None
+
+
+# --------------------------------------------------------------------------- #
+# 图片列表 & 官方划分
 # --------------------------------------------------------------------------- #
 
 
@@ -119,22 +229,53 @@ def _list_from_dir(src: str) -> List[str]:
     return sorted(files)
 
 
-def _load_partition(zip_path: Optional[str], src: Optional[str]) -> Dict[str, int]:
-    """读取 list_eval_partition.csv: image_id, partition (0=train,1=val,2=test)。"""
-    candidates: List[str] = []
+def _parse_partition_text(text: str) -> Dict[str, int]:
+    """解析官方 list_eval_partition.txt / Kaggle 的 .csv。
+
+    官方格式是空格或 tab 分隔、带一行表头::
+
+        image_id  partition
+        000001.jpg  0
+
+    Kaggle 版是逗号分隔的 CSV。这里统一按"任意空白或逗号"切分，
+    并跳过第二列不是整数的行（即表头）。
+    """
+    out: Dict[str, int] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.replace(",", " ").replace("\t", " ").split()
+        if len(parts) < 2:
+            continue
+        name, val = parts[0], parts[1]
+        if not val.lstrip("+-").isdigit():
+            continue  # 表头
+        out[Path(name).stem] = int(val)
+    return out
+
+
+def _load_partition(
+    zip_path: Optional[str] = None,
+    src: Optional[str] = None,
+    partition_file: Optional[Path] = None,
+) -> Dict[str, int]:
+    """返回 {图片名(不含扩展名): 0/1/2}。找不到就返回空字典。"""
+    if partition_file is not None and Path(partition_file).is_file():
+        with open(partition_file, "r", encoding="utf-8", errors="replace") as f:
+            return _parse_partition_text(f.read())
+
     if zip_path:
         with zipfile.ZipFile(zip_path) as z:
-            candidates = [n for n in z.namelist() if n.lower().endswith("list_eval_partition.csv")]
-        if candidates:
-            with zipfile.ZipFile(zip_path) as z:
-                text = z.read(candidates[0]).decode("utf-8")
-            reader = csv.DictReader(io.StringIO(text))
-            return {row["image_id"]: int(row["partition"]) for row in reader}
+            cands = [n for n in z.namelist() if Path(n).name.lower().startswith("list_eval_partition")]
+            if cands:
+                with zipfile.ZipFile(zip_path) as z2:
+                    return _parse_partition_text(z2.read(cands[0]).decode("utf-8", "replace"))
+
     if src:
-        for cand in Path(src).rglob("list_eval_partition.csv"):
-            with open(cand, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                return {row["image_id"]: int(row["partition"]) for row in reader}
+        for cand in Path(src).rglob("list_eval_partition.*"):
+            with open(cand, "r", encoding="utf-8", errors="replace") as f:
+                return _parse_partition_text(f.read())
     return {}
 
 
@@ -171,29 +312,56 @@ def _run_tasks(tasks, workers: int) -> List[Optional[np.ndarray]]:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="CelebA -> npy 预处理")
+    ap = argparse.ArgumentParser(
+        description="CelebA -> npy 预处理",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--root", type=str,
+                   help="官方目录（含 Img/、Eval/、Anno/），如 /root/autodl-pub/CelebA")
     g.add_argument("--zip", type=str, help="Kaggle 下载的 archive.zip")
     g.add_argument("--src", type=str, help="已解压的图片目录")
+    ap.add_argument("--partition", type=str, default=None,
+                    help="官方划分表路径，配合 --zip/--src 用；--root 模式会自动查找")
     ap.add_argument("--out", type=str, required=True, help="输出目录")
     ap.add_argument("--size", type=int, default=64, help="输出分辨率，论文里 64 最常用")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 1))
-    ap.add_argument("--max-images", type=int, default=0, help=">0 时只取前 N 张（快速试跑）")
+    ap.add_argument("--max-images", type=int, default=0, help=">0 时按比例只取前 N 张（快速试跑）")
     ap.add_argument("--limit-per-split", type=int, default=0, help=">0 时每个 split 只保留这么多")
     ap.add_argument("--preview", type=int, default=64, help="生成预览图的数量，0 表示不生成")
+    ap.add_argument("--dry-run", action="store_true", help="只打印检测到的数据来源，不实际转换")
     args = ap.parse_args()
 
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    is_zip = bool(args.zip)
-    src = str(args.zip) if is_zip else str(args.src)
+    # ---------------- 定位数据源 ----------------
+    partition_file: Optional[Path] = None
+    if args.root:
+        root = Path(args.root)
+        if not root.exists():
+            ap.error(f"--root 指向的目录不存在: {root}")
+        print(f"[0/4] 扫描官方目录 {root} ...")
+        try:
+            src, is_zip, desc = _detect_image_source(root)
+        except RuntimeError as e:
+            print(f"\n[错误] {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"      图片源: {desc}")
+        partition_file = _find_partition_file(root)
+        print(f"      划分表: {partition_file if partition_file else '未找到'}")
+    else:
+        is_zip = bool(args.zip)
+        src = str(args.zip) if is_zip else str(args.src)
+        print(f"[0/4] 数据源: {src}")
+        if args.partition:
+            partition_file = Path(args.partition)
+            if not partition_file.is_file():
+                ap.error(f"--partition 指向的文件不存在: {partition_file}")
+            print(f"      划分表: {partition_file}")
 
     print(f"[1/4] 扫描图片列表 ...")
     names = _list_from_zip(src) if is_zip else _list_from_dir(src)
     print(f"      共 {len(names)} 张图片")
 
-    partition = _load_partition(args.zip, args.src)
+    partition = _load_partition(args.zip, args.src, partition_file)
     print(f"[2/4] 官方划分表: {'已找到' if partition else '未找到（将按 8:1:1 兜底划分）'}"
           f"（{len(partition)} 条）")
 
@@ -202,9 +370,16 @@ def main() -> None:
     for n in names:
         buckets[_split_of(n, partition)].append(n)
 
+    # 划分表存在但一张都没匹配上，通常说明文件名对不上，早点提示
+    if partition and not any(buckets.values()):
+        raise RuntimeError("划分表读到了但没有任何图片匹配上，请检查文件名格式")
+    if partition:
+        matched = sum(1 for n in names if Path(n).stem in partition)
+        if matched < len(names):
+            print(f"      [warn] {len(names) - matched} 张图片不在划分表里，按 8:1:1 兜底")
+
     if args.max_images > 0:
         keep = min(args.max_images, len(names))
-        # 保持各 split 比例，先把总量压到 keep
         ratio = keep / len(names)
         for k in buckets:
             buckets[k] = buckets[k][: max(1, int(len(buckets[k]) * ratio))]
@@ -213,6 +388,15 @@ def main() -> None:
     if args.limit_per_split > 0:
         for k in buckets:
             buckets[k] = buckets[k][: args.limit_per_split]
+        print(f"      每个 split 限制 {args.limit_per_split} 张")
+
+    if args.dry_run:
+        print("\n--dry-run 结束，未写入任何文件。")
+        print(f"  预计输出: { {k: len(v) for k, v in buckets.items()} }")
+        return
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     tasks = []
     for split in ("train", "val", "test"):
@@ -235,12 +419,21 @@ def main() -> None:
 
     for split in ("train", "val", "test"):
         if not arrays[split]:
-            print(f"[warn] {split} 为空，跳过")
+            print(f"[warn] {split} 为空，跳过", file=sys.stderr)
             continue
         arr = np.stack(arrays[split], axis=0)
         path = out_dir / f"{split}.npy"
         np.save(path, arr)
         print(f"      {split}.npy  {tuple(arr.shape)}  {path.stat().st_size / 1024 ** 3:.2f} GB")
+
+    # val/test 为空会让后面的训练和评估直接崩，这里提前说清楚
+    missing = [s for s in ("val", "test") if not arrays[s]]
+    if missing:
+        print(f"\n[警告] {'/'.join(missing)} 集为空。可能的原因：\n"
+              f"  - 用的图片太少，而官方划分里这几张恰好都在 train（试试不加 --max-images）；\n"
+              f"  - 划分表没找到，且文件名不是数字，兜底 8:1:1 划分碰巧没分到。\n"
+              f"  训练不受影响，但 evaluate.py --split test 会失败。",
+              file=sys.stderr)
 
     meta = {
         "source": src,
@@ -248,7 +441,10 @@ def main() -> None:
         "image_size": args.size,
         "layout": "NCHW uint8, 0-255",
         "preprocess": "center-square-crop -> resize -> RGB",
-        "split_source": "list_eval_partition.csv (official)" if partition else "fallback 8:1:1",
+        "split_source": (
+            f"official {partition_file.name}" if partition_file
+            else ("official list_eval_partition" if partition else "fallback 8:1:1")
+        ),
         "counts": {k: len(v) for k, v in arrays.items()},
         "failed": failed,
     }
