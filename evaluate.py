@@ -137,8 +137,10 @@ def invert_gan(
     lr: float = 0.05,
     reg: float = 1e-3,
 ) -> torch.Tensor:
-    """为每张目标图优化一个 z，使 to01(G(z)) ≈ target。返回重建图像（CPU, [0,1]）。
+    """为每张目标图优化一个 z，使 G(z) ≈ target。返回重建图像（CPU, [0,1]）。
 
+    约定：targets 必须是 **[0,1]**（不是模型输入的 [-1,1]），
+    返回的重建也在 [0,1]，两边口径一致才能直接算 PSNR/SSIM。
     reg 是 z 的 L2 正则，防止优化到极端区域（那些区域生成质量通常很差）。
     """
     targets = targets.to(device).float()
@@ -147,7 +149,7 @@ def invert_gan(
     for _ in range(steps):
         opt.zero_grad(set_to_none=True)
         rec = to01(G(z))
-        loss = F.mse_loss(rec, to01(targets)) + reg * z.pow(2).mean()
+        loss = F.mse_loss(rec, targets) + reg * z.pow(2).mean()
         loss.backward()
         opt.step()
     with torch.no_grad():
@@ -160,10 +162,42 @@ def invert_gan(
 # --------------------------------------------------------------------------- #
 
 
+def _to01_safe(t: torch.Tensor) -> torch.Tensor:
+    """把 [-1,1] 或 [0,1] 的图统一成 [0,1]。
+
+    只在检测到负值时才换算：to01 对本来就是 [0,1] 的输入会把 0 映到 0.5，
+    直接调用反而会把图整体提亮，所以必须先判范围。
+    """
+    return to01(t) if float(t.min()) < -0.05 else t
+
+
+def _mean_pairwise_absdiff(images: torch.Tensor) -> float:
+    """一批图两两之间的平均绝对差，用来量化"多样性"。
+
+    全 0 意味着所有输出完全一致——无条件生成模型若出现这个数，
+    基本可以判定为模式崩塌（GAN）或后验塌缩（VAE），
+    此时 PSNR 依然可能"看着还行"，但模型是废的。
+    """
+    n = images.size(0)
+    if n < 2:
+        return float("nan")
+    total, count = 0.0, 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            total += float((images[i] - images[j]).abs().mean())
+            count += 1
+    return total / count if count else float("nan")
+
+
 def save_pair_grid(gt: torch.Tensor, pred: torch.Tensor, path: Path, title: str = "") -> None:
-    """上排 GT、下排预测，一眼看出差距。"""
+    """上排 GT、下排预测，便于直接比较。
+
+    两张图必须先统一到 [0,1] 再拼接：save_grid 靠"最小值是否 < -0.05"
+    判断输入是不是 [-1,1]，一旦混进 [-1,1] 的 GT，它会把整张拼图再 to01 一次，
+    把已经是 [0,1] 的预测压缩到 [0.5,1]，图上就成了灰白蒙版。
+    """
     n = min(gt.size(0), pred.size(0), 8)
-    stacked = torch.cat([gt[:n], pred[:n]], dim=0)
+    stacked = torch.cat([_to01_safe(gt[:n].cpu()), _to01_safe(pred[:n].cpu())], dim=0)
     save_grid(stacked, path, nrow=n)
     print(f"      [图] {path.name}  {title}")
 
@@ -176,15 +210,18 @@ def save_bar_chart(summary: dict, path: Path) -> None:
     except Exception:
         return
 
-    models = [m for m in ("VAE-recon", "GAN-inversion", "GAN-NN") if m in summary]
+    models = [m for m in ("VAE-recon", "GAN-inversion", "GAN-NN", "VAE-prior-NN")
+              if m in summary]
     if not models:
         return
+    colors = {"VAE-recon": "#4C78A8", "GAN-inversion": "#F58518",
+              "GAN-NN": "#B279A2", "VAE-prior-NN": "#54A24B"}
     fig, axes = plt.subplots(1, 2, figsize=(9, 3.6))
     for ax, key, label in ((axes[0], "psnr", "PSNR (dB)"), (axes[1], "ssim", "SSIM")):
         vals = [summary[m][key]["mean"] for m in models]
         errs = [summary[m][key]["std"] for m in models]
         bars = ax.bar(models, vals, yerr=errs, capsize=4,
-                      color=["#4C78A8", "#F58518", "#B279A2"][:len(models)])
+                      color=[colors[m] for m in models])
         ax.set_title(label)
         ax.grid(axis="y", alpha=0.3)
         for b, v in zip(bars, vals):
@@ -257,7 +294,11 @@ def main() -> None:
     )
     real_all = next(iter(gal_loader))[0].cpu()
     print(f"真实图库: {real_all.size(0)} 张（{args.split} split 共 {len(ds)} 张）")
-    gt_sub = real_all[: args.inversion_n]
+    # real_all 保持 [-1,1]（模型输入约定）；指标和存图一律用 gt_all（[0,1]）。
+    # 若把 [-1,1] 的 GT 直接与 [0,1] 的预测算 PSNR，误差会被放大 4 倍以上；
+    # 若把两者拼在一起交给 save_grid，它会整体再 to01 一次，把预测洗白。
+    gt_all = to01(real_all)
+    gt_sub = gt_all[: args.inversion_n]
 
     results: dict = {"config": vars(args), "meta": meta, "metrics": {}}
     summary: dict = {}
@@ -268,18 +309,37 @@ def main() -> None:
         vae, vhp = load_vae(args.vae, device)
         t0 = time.time()
         rec = reconstruct_vae(vae, real_all, device, args.batch_size)
-        gt = to01(real_all)
+        gt = gt_all
         v_psnr = psnr(rec, gt)
         v_ssim = ssim(rec, gt)
         summary["VAE-recon"] = {"psnr": summarize(v_psnr), "ssim": summarize(v_ssim)}
         print(f"      VAE 重建: PSNR={v_psnr.mean():.2f}dB  SSIM={v_ssim.mean():.4f}  "
               f"({real_all.size(0)} 张, {human_time(time.time() - t0)})")
+
+        # 后验塌缩自检：重建图之间的差异若接近 0，说明解码器已退化成"平均脸"，
+        # 此时 PSNR 仍有 11 dB 左右、指标看着"正常"，但模型实际什么都没学到。
+        # 第一次训练就踩了这个坑（8 张重建两两差异 0.0000），必须显式报出来。
+        n_chk = min(16, rec.size(0))
+        spread = _mean_pairwise_absdiff(rec[:n_chk])
+        gt_spread = _mean_pairwise_absdiff(gt[:n_chk])
+        ratio = spread / gt_spread if gt_spread > 0 else float("nan")
+        summary["VAE-recon"]["diversity"] = {
+            "recon_spread": round(spread, 6),
+            "gt_spread": round(gt_spread, 6),
+            "ratio": round(ratio, 4),
+        }
+        print(f"      重建多样性: {spread:.4f} / 真实图 {gt_spread:.4f} = {ratio * 100:.1f}%")
+        if ratio < 0.10:
+            print("      [警告] 重建多样性低于真实图的 10%，判定为后验塌缩："
+                  "解码器输出与输入无关。请检查重建损失与 KL 的量级是否失衡"
+                  "（models/vae.py 的 recon_loss_per_sample 必须对像素求和，不能求平均）。")
+
         save_pair_grid(gt, rec, out_dir / "compare_vae_recon.png", "VAE 重建(下) vs GT(上)")
         save_grid(rec[:64], out_dir / "samples_vae_recon.png", nrow=8)
 
-        prior = sample_vae_prior(vae, min(args.n_samples, 64), device)
-        save_grid(prior, out_dir / "samples_vae_prior.png", nrow=8)
-        # 先验采样的"最近邻伪 GT"指标，与 GAN 用同一口径
+        prior = sample_vae_prior(vae, args.n_samples, device)
+        save_grid(prior[:64], out_dir / "samples_vae_prior.png", nrow=8)
+        # 先验采样的"最近邻伪 GT"指标，与 GAN 用同一口径、同样本数
         nn_v = nearest_neighbor_metrics(prior, gt)
         summary["VAE-prior-NN"] = {
             "psnr": summarize(nn_v["psnr"]), "ssim": summarize(nn_v["ssim"])
@@ -297,7 +357,7 @@ def main() -> None:
             from fid import fid
 
             n = min(args.fid_n, real_all.size(0), prior.size(0))
-            f = fid(to01(real_all[:n]), prior[:n], device=device)
+            f = fid(gt_all[:n], prior[:n], device=device)
             summary["VAE-prior-NN"]["fid"] = f
             print(f"      VAE FID = {f:.2f}")
 
@@ -311,11 +371,27 @@ def main() -> None:
         print(f"      生成 {fake.size(0)} 张样本，用时 {human_time(time.time() - t0)}")
         save_grid(fake[:64], out_dir / "samples_gan.png", nrow=8)
 
-        gt = to01(real_all)
+        gt = gt_all
         nn = nearest_neighbor_metrics(fake, gt)
         summary["GAN-NN"] = {"psnr": summarize(nn["psnr"]), "ssim": summarize(nn["ssim"])}
         print(f"      GAN 生成(最近邻): PSNR={nn['psnr'].mean():.2f}dB  "
               f"SSIM={nn['ssim'].mean():.4f}")
+
+        # 模式崩塌自检：随机采样的图之间若几乎没有差异，说明 G 只学会了少数几个样本。
+        n_chk = min(16, fake.size(0))
+        g_spread = _mean_pairwise_absdiff(fake[:n_chk])
+        g_gt_spread = _mean_pairwise_absdiff(gt[:n_chk])
+        g_ratio = g_spread / g_gt_spread if g_gt_spread > 0 else float("nan")
+        summary["GAN-NN"]["diversity"] = {
+            "gen_spread": round(g_spread, 6),
+            "gt_spread": round(g_gt_spread, 6),
+            "ratio": round(g_ratio, 4),
+        }
+        print(f"      生成多样性: {g_spread:.4f} / 真实图 {g_gt_spread:.4f} = "
+              f"{g_ratio * 100:.1f}%")
+        if g_ratio < 0.10:
+            print("      [警告] 生成多样性低于真实图的 10%，疑似模式崩塌。"
+                  "可尝试降低学习率、增大 batch、或用 EMA 权重采样。")
         # 生成图 / 最近邻 GT 对照
         idx = nn["index"]
         save_pair_grid(gt[idx[:8]], fake[:8], out_dir / "compare_gan_nn.png",
@@ -349,7 +425,7 @@ def main() -> None:
             from fid import fid
 
             n = min(args.fid_n, real_all.size(0), fake.size(0))
-            f = fid(to01(real_all[:n]), fake[:n], device=device)
+            f = fid(gt_all[:n], fake[:n], device=device)
             summary["GAN-NN"]["fid"] = f
             print(f"      GAN FID = {f:.2f}")
 
@@ -402,8 +478,8 @@ def write_report(out_dir: Path, summary: dict, args, meta: dict) -> None:
         "",
         "## 1. 定量结果",
         "",
-        "| 方法 | PSNR (dB) | SSIM | 指标口径 |",
-        "| --- | --- | --- | --- |",
+        "| 方法 | PSNR (dB) | SSIM | 多样性 | 指标口径 |",
+        "| --- | --- | --- | --- | --- |",
     ]
     desc = {
         "VAE-recon": "重建：x̂ 与输入 x 一一对应，GT 真实",
@@ -413,7 +489,18 @@ def write_report(out_dir: Path, summary: dict, args, meta: dict) -> None:
     }
     for name in ("VAE-recon", "GAN-inversion", "GAN-NN", "VAE-prior-NN"):
         if name in summary:
-            lines.append(f"| {name} | {fmt(name, 'psnr')} | {fmt(name, 'ssim', 4)} | {desc[name]} |")
+            div = summary[name].get("diversity")
+            div_s = f"{div['ratio'] * 100:.1f}%" if div else "-"
+            lines.append(f"| {name} | {fmt(name, 'psnr')} | {fmt(name, 'ssim', 4)} "
+                         f"| {div_s} | {desc[name]} |")
+
+    lines += [
+        "",
+        "> **多样性**=该方法的 16 张输出两两平均绝对差 ÷ 真实图同样计算的差值。"
+        "接近 100% 表示输出之间差异和真实数据相当；接近 0% 表示所有输出几乎相同，"
+        "即 VAE 后验塌缩或 GAN 模式崩塌——此时 PSNR 再高也说明模型没学到东西。",
+        "",
+    ]
 
     lines += ["", "## 2. 结论（自动生成草稿，请结合定性图人工复核）", ""]
 
@@ -457,6 +544,18 @@ def write_report(out_dir: Path, summary: dict, args, meta: dict) -> None:
         lines.append(f"- **FID（越低越好）**：{s}。")
     else:
         lines.append("- **FID 未计算**（加 `--fid` 可计算，需联网下载 Inception 权重）。")
+
+    # (4) 多样性告警：指标好看但输出全一样，是生成模型最隐蔽的失败模式
+    collapsed = [(n, summary[n]["diversity"]["ratio"]) for n in summary
+                 if summary[n].get("diversity", {}).get("ratio", 1.0) < 0.10]
+    if collapsed:
+        detail = "，".join(f"{n} 仅 {r * 100:.1f}%" for n, r in collapsed)
+        lines.append(
+            f"- **⚠️ 多样性异常**：{detail}（相对真实图）。输出之间几乎无差异，"
+            f"说明模型塌缩——VAE 表现为所有重建都是同一张「平均脸」，"
+            f"GAN 表现为只生成少数几个样本。此情况下 PSNR/SSIM **不具备参考价值**，"
+            f"必须先修复训练问题（检查重建损失与 KL 的量纲是否匹配、beta 是否过大）。"
+        )
 
     lines += [
         "- **指标与感知的错位**：PSNR/SSIM 是逐像素指标，天然偏向「平滑但结构正确」的结果；"
