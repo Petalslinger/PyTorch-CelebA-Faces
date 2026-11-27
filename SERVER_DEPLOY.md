@@ -32,7 +32,7 @@ scp server_bundle.tar.gz root@你的实例IP:~/
 ```bash
 ssh root@你的实例IP
 
-cd ~
+cd /root/autodl-tmp
 tar -xzf server_bundle.tar.gz
 cd server
 cat VERSION            # 确认 commit 与本地打包版本一致
@@ -103,7 +103,7 @@ tmux new -s celeba
 在 tmux 会话中执行：
 
 ```bash
-cd ~/server
+cd /root/autodl-tmp/server
 
 python train_gan.py --data /root/autodl-tmp/data/celeba64 \
     --out /root/autodl-tmp/runs/gan64 \
@@ -136,7 +136,7 @@ python train_vae.py --data /root/autodl-tmp/data/celeba64 \
 ### 步骤 8：评估
 
 ```bash
-cd ~/server
+cd /root/autodl-tmp/server
 
 python evaluate.py \
     --data /root/autodl-tmp/data/celeba64 \
@@ -151,11 +151,11 @@ python evaluate.py \
 ### 步骤 9：取回结果
 
 ```bash
-# 服务器端：打包。脚本会自动向外查找 ~/autodl-tmp/runs 下的 GAN、VAE 与评估目录
-bash ~/server/collect_results.sh
+# 服务器端：打包。脚本会自动向外查找 /root/autodl-tmp/runs 下的 GAN、VAE 与评估目录
+bash /root/autodl-tmp/server/collect_results.sh
 
 # 本地执行：下载并解压
-scp root@你的实例IP:~/server/results_*.tar.gz ./
+scp root@你的实例IP:/root/autodl-tmp/server/results_*.tar.gz ./
 tar -xzf results_*.tar.gz
 ```
 
@@ -179,7 +179,7 @@ ROOT=/root/autodl-pub/CelebA FULL=1 CLEAN=1 FID=1 \
 # 按 Ctrl+B 后按 D 退出
 
 # 训练与评估完成后取回结果
-bash ~/server/collect_results.sh
+bash /root/autodl-tmp/server/collect_results.sh
 ```
 
 ---
@@ -190,22 +190,51 @@ bash ~/server/collect_results.sh
 
 ```bash
 # 方式一：直接传输目录（改动较小时适用）
-scp -r server user@server:~/celeba
+scp -r server root@你的实例IP:/root/autodl-tmp/server
 
 # 方式二：先打包再传输（文件较多或网络较慢时更高效）
-bash pack_server.sh                      # 生成 server_bundle.tar.gz
-scp server_bundle.tar.gz user@server:~/
-ssh user@server 'tar -xzf server_bundle.tar.gz'
+bash pack_server.sh --tar                # 生成 server_bundle.tar.gz
+scp server_bundle.tar.gz root@你的实例IP:/root/autodl-tmp/
+ssh root@你的实例IP 'cd /root/autodl-tmp && tar -xzf server_bundle.tar.gz'
 ```
+
+### 1.1 推荐目录布局
+
+代码与产物放在同一层，脚本会自动识别，无需手写绝对路径：
+
+```
+/root/autodl-tmp/                 ← 数据盘，容量大，重启不丢
+├── server/                       ← 代码（本目录）
+│   ├── run_all.sh  smoke_test.sh  collect_results.sh
+│   ├── prepare_data.py  train_gan.py  train_vae.py  evaluate.py
+│   └── models/
+├── data/celeba64/                ← 转换后的 npy（train/val/test.npy + meta.json）
+└── runs/
+    ├── gan64/   vae64/   eval64/ ← 训练与评估产物
+```
+
+`run_all.sh` 与 `smoke_test.sh` 对 `DATA`、`GAN_OUT`、`VAE_OUT`、`EVAL_OUT`
+的默认值会依次尝试 `./x`、`../x`、`../../x`、`~/autodl-tmp/x`、`/root/autodl-tmp/x`，
+命中第一个已存在的目录。因此按上面的布局放置后，在 `server/` 里直接
+`bash run_all.sh` 即可，脚本会自己找到 `../data/celeba64` 与 `../runs/*`。
+显式传入环境变量仍然优先。
+
+数据来源自动探测顺序为 `ROOT` > `ZIP` > `SRC` > `/root/autodl-pub/CelebA` > `archive.zip`，
+AutoDL 实例上无需额外配置。
+
+> 注意：`/root/autodl-pub` 是只读挂载，不能写入；系统盘 `/root` 通常只有 30 GB，
+> 而 64px 的 npy 约 2.5 GB、每个 checkpoint 70~90 MB，因此产物务必落在
+> `/root/autodl-tmp` 下。
 
 服务器端目录结构如下：
 
 ```
-~/celeba/
+server/
 ├── README.md            ← 即本文档
 ├── VERSION              ← 打包时的 commit 与时间
 ├── smoke_test.sh        ← 冒烟测试
 ├── run_all.sh           ← 一键完整流程
+├── collect_results.sh   ← 结果打包
 ├── requirements.txt
 ├── prepare_data.py  dataset.py  utils.py  metrics.py  fid.py
 ├── train_gan.py  train_vae.py  evaluate.py
@@ -267,11 +296,12 @@ python prepare_data.py --root /root/autodl-pub/CelebA \
 
 ```bash
 # 本地执行
-scp archive.zip user@server:~/celeba/
+scp archive.zip root@你的实例IP:/root/autodl-tmp/
 
 # 服务器端执行
-cd ~/celeba
-python prepare_data.py --zip archive.zip --out data/celeba64 --size 64
+cd /root/autodl-tmp/server
+python prepare_data.py --zip /root/autodl-tmp/archive.zip \
+    --out /root/autodl-tmp/data/celeba64 --size 64
 ```
 
 全量 20 万张图片，16 进程约需 5~15 分钟，产出约 2.5 GB 的 npy 文件。
@@ -280,7 +310,7 @@ python prepare_data.py --zip archive.zip --out data/celeba64 --size 64
 
 ```bash
 # 本地执行（data/celeba64 下三个 npy 合计约 2.5 GB）
-scp -r data/celeba64 user@server:~/celeba/data/
+scp -r data/celeba64 root@你的实例IP:/root/autodl-tmp/data/
 ```
 
 适用于服务器 CPU 性能较弱，或本地已完成转换、不希望重复转换的情况。
@@ -289,23 +319,25 @@ zip 原始数据为 1.4 GB，转换后为 2.5 GB，可依网络条件选择。
 ### 方案 C：服务器上已有解压后的图片目录
 
 ```bash
-python prepare_data.py --src /path/to/img_align_celeba --out data/celeba64 --size 64
+python prepare_data.py --src /path/to/img_align_celeba \
+    --out /root/autodl-tmp/data/celeba64 --size 64
 
 # 划分表位于其他位置时一并指定
 python prepare_data.py --src /path/to/img_align_celeba \
-    --partition /path/to/Eval/list_eval_partition.txt --out data/celeba64
+    --partition /path/to/Eval/list_eval_partition.txt \
+    --out /root/autodl-tmp/data/celeba64
 ```
 
 ### 转换完成后检查预览图
 
 ```bash
-ls -lh data/celeba64/
+ls -lh /root/autodl-tmp/data/celeba64/
 # 将 preview.png 取回本地查看，确认人脸居中、无黑边
 ```
 
 ```bash
 # 本地执行
-scp user@server:~/celeba/data/celeba64/preview.png .
+scp root@你的实例IP:/root/autodl-tmp/data/celeba64/preview.png .
 ```
 
 ## 4. 冒烟测试
@@ -340,8 +372,8 @@ PY=$(which python) bash smoke_test.sh  # 强制使用当前环境的 Python
 ```bash
 tmux new -s celeba
 conda activate celeba
-cd ~/celeba
-FULL=1 bash run_all.sh 2>&1 | tee train.log
+cd /root/autodl-tmp/server
+FULL=1 CLEAN=1 FID=1 bash run_all.sh 2>&1 | tee /root/autodl-tmp/all.log
 # 按 Ctrl+B 后按 D 退出，训练在后台继续运行
 # 重新接入：tmux attach -t celeba
 ```
@@ -440,7 +472,7 @@ python evaluate.py --data data/celeba64 --out runs/eval \
 一个带说明的压缩包。在代码目录执行即可，无需先切换到输出目录：
 
 ```bash
-bash ~/server/collect_results.sh
+bash /root/autodl-tmp/server/collect_results.sh
 ```
 
 脚本会依次检查脚本所在目录下的 `runs/`、上一级与上两级的 `runs/`，
@@ -480,7 +512,7 @@ bash collect_results.sh --out 第一轮64px  # 自定义包名
 
 ```bash
 # 本地执行
-scp user@server:~/server/results_20261127_153012.tar.gz ./
+scp root@你的实例IP:/root/autodl-tmp/server/results_20261127_153012.tar.gz ./
 tar -xzf results_20261127_153012.tar.gz
 ```
 
@@ -491,7 +523,7 @@ tar -xzf results_20261127_153012.tar.gz
 
 ```bash
 # 本地执行
-scp -r user@server:~/celeba/runs/eval ./runs_eval
+scp -r root@你的实例IP:/root/autodl-tmp/runs/eval64 ./runs_eval
 ```
 
 实验报告所需的文件如下：
