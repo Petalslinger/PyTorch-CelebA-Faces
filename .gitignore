@@ -11,6 +11,10 @@ _smoke/
 *.pth
 *.ckpt
 
+# server/ 由 pack_server.sh 生成，代码以项目根为准，不入库
+server/
+server_bundle.tar.gz
+
 # Python
 __pycache__/
 *.py[cod]

@@ -105,6 +105,21 @@ python evaluate.py --data data/celeba64 --out runs/eval \
 
 ## 4. 跑起来
 
+### 4.0 部署到服务器
+
+把要上服务器的文件收进一个自包含目录：
+
+```bash
+bash pack_server.sh          # 生成 server/（含 README、VERSION、全部代码）
+bash pack_server.sh --tar    # 额外打包成 server_bundle.tar.gz（约 35 KB）
+```
+
+然后 `scp -r server user@server:~/celeba` 或 `scp server_bundle.tar.gz user@server:~/`。
+服务器端的完整流程（装环境、传数据、tmux 训练、取回结果、常见问题）
+见 [SERVER_DEPLOY.md](SERVER_DEPLOY.md)。
+
+> `server/` 是生成物，已在 `.gitignore` 里；改代码请改项目根的文件再重新打包。
+
 ### 4.1 先冒烟测试（强烈建议）
 
 换一台新机器（尤其是服务器）先跑这个，确认环境、数据、模型、评估四条链路都通：
