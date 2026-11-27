@@ -1,0 +1,28 @@
+# 数据与压缩包（体积大，用 prepare_data.py 现场生成）
+archive.zip
+data/
+*.npy
+
+# 训练产物
+runs/
+outputs/
+_smoke/
+*.pt
+*.pth
+*.ckpt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 杂项
+*.log

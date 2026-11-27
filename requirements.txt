@@ -1,0 +1,6 @@
+# 训练与评估依赖（PyTorch 请按 CUDA 版本单独安装，见 README）
+torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+Pillow>=9.5
+matplotlib>=3.7
