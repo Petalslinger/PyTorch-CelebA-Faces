@@ -15,7 +15,8 @@
 #   （都不指定时：先看已有 npy，再看 /root/autodl-pub/CelebA，最后找 archive.zip）
 #
 # 环境变量：
-#   PY       python 解释器（默认 python）
+#   PY       python 解释器；不填或填错时自动探测（依次试 $CONDA_PREFIX、
+#            /root/miniconda3/envs/celeba、/opt/conda/envs/celeba、PATH 上的 python）
 #   SIZE     分辨率（默认 64）
 #   N        取多少张图（默认 2000）
 #   EPOCHS   训练轮数（默认 1）
@@ -26,7 +27,6 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PY=${PY:-python}
 export PYTHONIOENCODING=utf-8
 SIZE=${SIZE:-64}
 N=${N:-2000}
@@ -39,8 +39,92 @@ say() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 ok()  { printf '\033[1;32m   ✓ %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31m   ✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# 找一个能 import torch 的 python：优先 $PY，其次常见 conda 位置，最后 PATH。
+# AutoDL 的 conda 在 /root/miniconda3，不在 /opt/conda，所以不能写死路径。
+resolve_python() {
+  local cand base env_py
+  local -a cands=()
+
+  if [[ -n "${PY:-}" ]]; then
+    if [[ -x "${PY}" ]] || command -v "${PY}" >/dev/null 2>&1; then
+      echo "${PY}"; return 0          # 用户明确指定且存在，尊重它
+    fi
+    printf '\033[1;33m   警告：PY=%s 不存在，改为自动探测\033[0m\n' "${PY}" >&2
+  fi
+
+  # 1) 常见固定位置
+  for cand in \
+      "${CONDA_PREFIX:-}/bin/python" \
+      "${CONDA_PREFIX:-}/python.exe" \
+      /root/miniconda3/envs/celeba/bin/python \
+      /root/miniconda3/bin/python \
+      /opt/conda/envs/celeba/bin/python \
+      /opt/conda/bin/python \
+      "${HOME:-/root}/miniconda3/envs/celeba/bin/python" \
+      "${HOME:-/root}/miniconda3/bin/python" \
+      "${HOME:-/root}/anaconda3/envs/celeba/bin/python" \
+      "${HOME:-/root}/anaconda3/bin/python" \
+      python3 python; do
+    [[ -n "${cand}" ]] || continue
+    cands+=("${cand}")
+  done
+
+  # 2) 环境名不一定叫 celeba，把每个 conda 环境都加进候选
+  #    （同时试 Linux 的 bin/python 和 Windows 的 python.exe，本机也能自测）
+  for base in "${CONDA_PREFIX:-}" /root/miniconda3 /opt/conda \
+              "${HOME:-/root}/miniconda3" "${HOME:-/root}/anaconda3"; do
+    [[ -n "${base}" && -d "${base}" ]] || continue
+    for env_py in "${base}"/envs/*/bin/python "${base}"/envs/*/python.exe; do
+      [[ -x "${env_py}" ]] && cands+=("${env_py}")
+    done
+  done
+
+  # 3) 两轮挑选：优先 CUDA 可用的，其次任意能 import torch 的
+  local want
+  for want in cuda any; do
+    for cand in "${cands[@]}"; do
+      if [[ "${cand}" == */* ]]; then
+        [[ -x "${cand}" ]] || continue
+      else
+        command -v "${cand}" >/dev/null 2>&1 || continue
+      fi
+      if [[ "${want}" == "cuda" ]]; then
+        "${cand}" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" \
+          >/dev/null 2>&1 || continue
+      else
+        "${cand}" -c "import torch" >/dev/null 2>&1 || continue
+      fi
+      echo "${cand}"; return 0
+    done
+  done
+  return 1
+}
+
 # ---------------------------------------------------------------- 0. 环境
 say "0/6 环境检查"
+if ! PY="$(resolve_python)"; then
+  {
+    echo
+    echo "   找不到装了 torch 的 python。这台机器上现有："
+    for c in python python3; do
+      if p="$(command -v "${c}" 2>/dev/null)"; then
+        echo "     PATH 上的 ${c}: ${p}"
+      fi
+    done
+    for base in /root/miniconda3 /opt/conda "${HOME:-/root}/miniconda3" "${HOME:-/root}/anaconda3"; do
+      [[ -d "${base}/envs" ]] && ls -d "${base}"/envs/* 2>/dev/null | sed 's/^/     conda env: /'
+    done
+    echo
+    echo "   解决办法（三选一）："
+    echo "     1) 先激活环境：conda activate celeba && bash smoke_test.sh"
+    echo "     2) 直接指定：  PY=\$(which python) bash smoke_test.sh"
+    echo "     3) 还没装环境的话，先按 README 第 2 节装："
+    echo "          conda create -n celeba python=3.10 -y && conda activate celeba"
+    echo "          pip install -r requirements.txt"
+  } >&2
+  die "python 环境未就绪"
+fi
+printf '   使用 %s\n' "${PY}"
 $PY -c "import sys; print('   python', sys.version.split()[0], '->', sys.executable)"
 $PY - <<'EOF' || die "torch/torchvision 不可用，先按 README 第 0 节安装"
 import torch, torchvision

@@ -12,8 +12,8 @@
 #   ZIP=archive.zip bash run_all.sh                # Kaggle 压缩包
 #   SRC=./img_align_celeba bash run_all.sh         # 已解压的图片目录
 set -euo pipefail
+cd "$(dirname "$0")"
 
-PY=${PY:-python}
 export PYTHONIOENCODING=utf-8
 SIZE=${SIZE:-64}
 BATCH=${BATCH:-128}
@@ -23,6 +23,46 @@ DATA=${DATA:-data/celeba${SIZE}}
 GAN_OUT=${GAN_OUT:-runs/gan${SIZE}}
 VAE_OUT=${VAE_OUT:-runs/vae${SIZE}}
 EVAL_OUT=${EVAL_OUT:-runs/eval${SIZE}}
+
+# 找一个能 import torch 的 python（AutoDL 的 conda 在 /root/miniconda3，不写死路径）
+resolve_python() {
+  local cand
+  if [[ -n "${PY:-}" ]]; then
+    if [[ -x "${PY}" ]] || command -v "${PY}" >/dev/null 2>&1; then
+      echo "${PY}"; return 0
+    fi
+    printf '\033[1;33m   警告：PY=%s 不存在，改为自动探测\033[0m\n' "${PY}" >&2
+  fi
+  for cand in \
+      "${CONDA_PREFIX:-}/bin/python" \
+      /root/miniconda3/envs/celeba/bin/python \
+      /root/miniconda3/bin/python \
+      /opt/conda/envs/celeba/bin/python \
+      /opt/conda/bin/python \
+      "${HOME:-/root}/miniconda3/envs/celeba/bin/python" \
+      "${HOME:-/root}/miniconda3/bin/python" \
+      "${HOME:-/root}/anaconda3/envs/celeba/bin/python" \
+      "${HOME:-/root}/anaconda3/bin/python" \
+      python3 \
+      python; do
+    [[ -n "${cand}" ]] || continue
+    if [[ "${cand}" == */* ]]; then
+      [[ -x "${cand}" ]] || continue
+    else
+      command -v "${cand}" >/dev/null 2>&1 || continue
+    fi
+    "${cand}" -c "import torch" >/dev/null 2>&1 || continue
+    echo "${cand}"; return 0
+  done
+  return 1
+}
+
+if ! PY="$(resolve_python)"; then
+  echo "找不到装了 torch 的 python。先 conda activate celeba，或 PY=\$(which python) bash run_all.sh" >&2
+  echo "还没装环境的话按 README 第 2 节装。" >&2
+  exit 1
+fi
+printf '\033[1;36m== 使用 %s ==\033[0m\n' "${PY}"
 
 if [[ "${FULL:-0}" == "1" ]]; then
   PREP_EXTRA=""
