@@ -5,8 +5,14 @@
 # 用法：
 #   bash smoke_test.sh                    # 默认 2000 张 + 1 epoch + 50 step
 #   N=5000 STEPS=200 bash smoke_test.sh   # 想多看一点
-#   DATA=./img_align_celeba bash smoke_test.sh   # 已经解压好图片，直接指目录
 #   SIZE=128 bash smoke_test.sh           # 顺便验证 128 分辨率
+#   WORKERS=0 bash smoke_test.sh          # 强制单进程（容器禁止多进程时）
+#
+# 数据来源（按顺序探测，用哪个都行）：
+#   ROOT=/root/autodl-pub/CelebA bash smoke_test.sh   # AutoDL 公共数据集（官方目录）
+#   DATA_SRC=./img_align_celeba bash smoke_test.sh    # 已解压的图片目录
+#   ZIP=archive.zip bash smoke_test.sh                # Kaggle 压缩包
+#   （都不指定时：先看已有 npy，再看 /root/autodl-pub/CelebA，最后找 archive.zip）
 #
 # 环境变量：
 #   PY       python 解释器（默认 python）
@@ -14,7 +20,9 @@
 #   N        取多少张图（默认 2000）
 #   EPOCHS   训练轮数（默认 1）
 #   STEPS    每轮步数上限（默认 50）
+#   WORKERS  DataLoader 进程数（默认 2，探测失败自动降为 0）
 #   OUT      所有产物目录（默认 _smoke，跑完可以直接删）
+#   DATA     输出 npy 的目录（默认 ${OUT}/celeba${SIZE}）
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -68,22 +76,36 @@ fi
 
 # ---------------------------------------------------------------- 1. 数据
 say "1/6 数据准备（${N} 张，${SIZE}x${SIZE}）"
+PREP_HINT="--root /root/autodl-pub/CelebA"   # 末尾提示里展示的命令，下面会按实际情况覆盖
 if [[ -f "${DATA}/train.npy" ]]; then
   ok "已存在 ${DATA}/train.npy，跳过"
 elif [[ -f "data/celeba${SIZE}/train.npy" ]]; then
   # 之前已经全量转换过，直接复用，省时间
   DATA="data/celeba${SIZE}"
   ok "复用已准备好的数据 ${DATA}"
+elif [[ -n "${ROOT:-}" ]]; then
+  PREP_HINT="--root ${ROOT}"
+  $PY prepare_data.py --root "${ROOT}" --out "${DATA}" --size "${SIZE}" --max-images "${N}"
 elif [[ -n "${DATA_SRC:-}" && -d "${DATA_SRC}" ]]; then
+  PREP_HINT="--src ${DATA_SRC}"
   $PY prepare_data.py --src "${DATA_SRC}" --out "${DATA}" --size "${SIZE}" --max-images "${N}"
+elif [[ -d /root/autodl-pub/CelebA ]]; then
+  echo "   自动使用 AutoDL 公共数据集 /root/autodl-pub/CelebA"
+  PREP_HINT="--root /root/autodl-pub/CelebA"
+  $PY prepare_data.py --root /root/autodl-pub/CelebA --out "${DATA}" --size "${SIZE}" --max-images "${N}"
+elif [[ -n "${ZIP:-}" ]]; then
+  echo "   使用压缩包 ${ZIP}"
+  PREP_HINT="--zip ${ZIP}"
+  $PY prepare_data.py --zip "${ZIP}" --out "${DATA}" --size "${SIZE}" --max-images "${N}"
 else
   # 优先项目根的 archive.zip，其次当前目录，最后再往上找一层
   ZIP=""
   for c in archive.zip ../archive.zip ../../archive.zip; do
     [[ -f "$c" ]] && { ZIP="$c"; break; }
   done
-  [[ -n "$ZIP" ]] || die "找不到 archive.zip。请把 Kaggle 的 archive.zip 放到项目根目录，或用 DATA_SRC=<图片目录> 指定"
+  [[ -n "$ZIP" ]] || die "找不到数据。用 ROOT=<官方目录> / DATA_SRC=<图片目录> / ZIP=<压缩包> 指定其一"
   echo "   使用 ${ZIP}"
+  PREP_HINT="--zip ${ZIP}"
   $PY prepare_data.py --zip "${ZIP}" --out "${DATA}" --size "${SIZE}" --max-images "${N}"
 fi
 
@@ -171,7 +193,7 @@ cat <<EOF
         results.json 里的数字没有参考价值。
 
   接下来正式训练：
-    python prepare_data.py --zip archive.zip --out data/celeba${SIZE} --size ${SIZE}
+    python prepare_data.py ${PREP_HINT} --out data/celeba${SIZE} --size ${SIZE}
     python train_gan.py --data data/celeba${SIZE} --out runs/gan${SIZE} --epochs 30 --batch-size 128 --amp
     python train_vae.py --data data/celeba${SIZE} --out runs/vae${SIZE} --epochs 30 --batch-size 128 --lr 1e-3 --kl-warmup 5 --amp
     python evaluate.py --data data/celeba${SIZE} --out runs/eval --gan runs/gan${SIZE} --vae runs/vae${SIZE} --n-samples 2048 --inversion-n 64 --fid
