@@ -22,10 +22,23 @@ BATCH=${BATCH:-128}
 EPOCHS=${EPOCHS:-20}
 WORKERS=${WORKERS:-4}
 SAVE_EVERY=${SAVE_EVERY:-5}
-DATA=${DATA:-data/celeba${SIZE}}
-GAN_OUT=${GAN_OUT:-runs/gan${SIZE}}
-VAE_OUT=${VAE_OUT:-runs/vae${SIZE}}
-EVAL_OUT=${EVAL_OUT:-runs/eval${SIZE}}
+
+# 代码目录与产物目录可以分开：脚本放在 /root/autodl-tmp/server 时，
+# 数据与结果通常落在 /root/autodl-tmp 下（数据盘），而不是代码目录里。
+# 这里自动往上找一层，命中就用，省得每次手写 DATA=/root/autodl-tmp/data/celeba64。
+find_dir() {  # find_dir <相对路径>：返回第一个存在的候选，都不存在则原样返回
+  local rel="$1" c
+  for c in "${rel}" "../${rel}" "../../${rel}" \
+           "${HOME:-/root}/autodl-tmp/${rel}" "/root/autodl-tmp/${rel}"; do
+    [[ -d "${c}" ]] && { printf '%s\n' "${c}"; return 0; }
+  done
+  printf '%s\n' "${rel}"
+}
+
+DATA=${DATA:-$(find_dir "data/celeba${SIZE}")}
+GAN_OUT=${GAN_OUT:-$(find_dir "runs/gan${SIZE}")}
+VAE_OUT=${VAE_OUT:-$(find_dir "runs/vae${SIZE}")}
+EVAL_OUT=${EVAL_OUT:-$(find_dir "runs/eval${SIZE}")}
 # 评估参数（与报告口径相关，不要随意调小）
 EVAL_N=${EVAL_N:-2048}
 INV_N=${INV_N:-64}

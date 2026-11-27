@@ -161,11 +161,18 @@ fi
 # ---------------------------------------------------------------- 1. 数据
 say "1/6 数据准备（${N} 张，${SIZE}x${SIZE}）"
 PREP_HINT="--root /root/autodl-pub/CelebA"   # 末尾提示里展示的命令，下面会按实际情况覆盖
+# 代码目录与数据目录可以分开（server 放在 /root/autodl-tmp/server 时，
+# 已转换好的数据通常在上一层的 data/ 下），这里往上找一层复用，避免重复转换。
+EXISTING_DATA=""
+for c in "data/celeba${SIZE}" "../data/celeba${SIZE}" "../../data/celeba${SIZE}" \
+         "${HOME:-/root}/autodl-tmp/data/celeba${SIZE}" "/root/autodl-tmp/data/celeba${SIZE}"; do
+  [[ -f "${c}/train.npy" ]] && { EXISTING_DATA="${c}"; break; }
+done
 if [[ -f "${DATA}/train.npy" ]]; then
   ok "已存在 ${DATA}/train.npy，跳过"
-elif [[ -f "data/celeba${SIZE}/train.npy" ]]; then
+elif [[ -n "${EXISTING_DATA}" ]]; then
   # 之前已经全量转换过，直接复用，省时间
-  DATA="data/celeba${SIZE}"
+  DATA="${EXISTING_DATA}"
   ok "复用已准备好的数据 ${DATA}"
 elif [[ -n "${ROOT:-}" ]]; then
   PREP_HINT="--root ${ROOT}"
@@ -276,13 +283,14 @@ cat <<EOF
   注意：这里只跑了 ${EPOCHS} 个 epoch × ${STEPS} step，生成结果必然是噪声，
         results.json 里的数字没有参考价值。
 
-  接下来正式训练：
-    python prepare_data.py ${PREP_HINT} --out data/celeba${SIZE} --size ${SIZE}
-    python train_gan.py --data data/celeba${SIZE} --out runs/gan${SIZE} --epochs 30 --batch-size 128 --amp
-    python train_vae.py --data data/celeba${SIZE} --out runs/vae${SIZE} --epochs 30 --batch-size 128 --lr 1e-3 --kl-warmup 5 --amp
-    python evaluate.py --data data/celeba${SIZE} --out runs/eval --gan runs/gan${SIZE} --vae runs/vae${SIZE} --n-samples 2048 --inversion-n 64 --fid
+  接下来正式训练（推荐直接跑一键脚本，它会自动找数据与输出目录）：
+    FULL=1 CLEAN=1 FID=1 bash run_all.sh 2>&1 | tee all.log
 
-  或者直接：FULL=1 bash run_all.sh
+  或手动分步（${DATA} 是上面冒烟用的数据目录）：
+    python prepare_data.py ${PREP_HINT} --out ${DATA} --size ${SIZE}
+    python train_gan.py --data ${DATA} --out runs/gan${SIZE} --epochs 30 --batch-size 128 --amp --save-every 5
+    python train_vae.py --data ${DATA} --out runs/vae${SIZE} --epochs 30 --batch-size 128 --lr 1e-3 --kl-warmup 5 --amp --save-every 5
+    python evaluate.py --data ${DATA} --out runs/eval${SIZE} --gan runs/gan${SIZE} --vae runs/vae${SIZE} --n-samples 2048 --inversion-n 64 --fid
 
   清理冒烟测试产物：rm -rf ${OUT}
 EOF
