@@ -354,8 +354,10 @@ EPOCHS=50 BATCH=128 bash run_all.sh
 bash collect_results.sh
 ```
 
-脚本会自动探测 `runs/` 下的 GAN、VAE 与评估目录，输出
-`results_<时间戳>.tar.gz`（通常 1~10 MB）。包内除图表外还包含：
+脚本会自动定位 GAN、VAE 与评估目录，输出 `results_<时间戳>.tar.gz`
+（通常 1~10 MB）。查找顺序为脚本所在目录的 `runs/`、上两级目录的 `runs/`，
+以及 `~/autodl-tmp/runs` 等常见位置——训练产物常被写到数据盘而非代码目录，
+因此不必先 `cd` 到输出目录。包内除图表外还包含：
 
 | 文件 | 内容 |
 | --- | --- |
@@ -367,6 +369,7 @@ bash collect_results.sh
 常用选项：
 
 ```bash
+bash collect_results.sh --runs /root/autodl-tmp/runs   # 指定结果根目录
 bash collect_results.sh --with-ckpt             # 附带 last.pt / best.pt
 bash collect_results.sh --data data/celeba64    # 附带 meta.json 与 preview.png
 bash collect_results.sh --gan runs/gan64 --vae runs/vae64 --eval runs/eval

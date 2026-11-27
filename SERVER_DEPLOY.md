@@ -147,11 +147,11 @@ python evaluate.py \
 ### 步骤 9：取回结果
 
 ```bash
-# 服务器端：打包（自动探测 runs/ 下的 GAN、VAE 与评估目录）
-cd /root/autodl-tmp && bash collect_results.sh
+# 服务器端：打包。脚本会自动向外查找 ~/autodl-tmp/runs 下的 GAN、VAE 与评估目录
+bash ~/server/collect_results.sh
 
 # 本地执行：下载并解压
-scp root@你的实例IP:/root/autodl-tmp/results_*.tar.gz ./
+scp root@你的实例IP:~/server/results_*.tar.gz ./
 tar -xzf results_*.tar.gz
 ```
 
@@ -175,7 +175,7 @@ ROOT=/root/autodl-pub/CelebA FULL=1 \
 # 按 Ctrl+B 后按 D 退出
 
 # 训练与评估完成后取回结果
-cd /root/autodl-tmp && bash collect_results.sh
+bash ~/server/collect_results.sh
 ```
 
 ---
@@ -410,12 +410,17 @@ python evaluate.py --data data/celeba64 --out runs/eval \
 
 ### 7.1 一键打包（推荐）
 
-`collect_results.sh` 会自动探测 `runs/` 下的 GAN、VAE 与评估目录，把写报告所需的
-文件整理成一个带说明的压缩包：
+`collect_results.sh` 会自动定位训练与评估产物，把撰写报告所需的文件整理成
+一个带说明的压缩包。在代码目录执行即可，无需先切换到输出目录：
 
 ```bash
-bash collect_results.sh
+bash ~/server/collect_results.sh
 ```
+
+脚本会依次检查脚本所在目录下的 `runs/`、上一级与上两级的 `runs/`，
+以及 `~/autodl-tmp/runs`、`/root/autodl-tmp/runs` 等常见位置。
+本实验的默认配置下，输出位于 `/root/autodl-tmp/runs/{gan64,vae64,eval64}`，
+均可自动识别。
 
 脚本输出形如 `results_20261127_153012.tar.gz`，体积通常在 1~10 MB（取决于样本图数量）。
 包内结构：
@@ -428,24 +433,28 @@ results_<时间戳>/
 ├── VERSION         打包时的代码版本
 ├── eval/           report.md、results.json 与全部对比图
 ├── gan/            loss.csv、train_summary.json、samples/
-└── vae/            同上
+├── vae/            同上
+└── data/           meta.json 与 preview.png（能自动找到数据目录时附带）
 ```
 
 常用选项：
 
 ```bash
+bash collect_results.sh --runs /root/autodl-tmp/runs   # 指定结果根目录
 bash collect_results.sh --with-ckpt      # 附带 last.pt / best.pt（每个 70~90 MB）
 bash collect_results.sh --with-epochs    # 附带全部 epoch_*.pt（体积很大）
 bash collect_results.sh --data data/celeba64   # 附带 meta.json 与 preview.png
-bash collect_results.sh --gan runs/gan64 --vae runs/vae64 --eval runs/eval   # 显式指定
+bash collect_results.sh --gan runs/gan64 --vae runs/vae64 --eval runs/eval   # 逐项指定
 bash collect_results.sh --out 第一轮64px  # 自定义包名
 ```
+
+若自动探测未命中，脚本会列出已查找过的路径并提示改用 `--runs` 或逐项指定。
 
 随后下载到本地：
 
 ```bash
 # 本地执行
-scp user@server:~/celeba/results_20261127_153012.tar.gz ./
+scp user@server:~/server/results_20261127_153012.tar.gz ./
 tar -xzf results_20261127_153012.tar.gz
 ```
 

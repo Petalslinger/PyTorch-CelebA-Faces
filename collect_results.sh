@@ -24,6 +24,7 @@ VAE_DIR=""
 EVAL_DIR=""
 DATA_DIR=""
 OUT_NAME=""
+RUNS_DIR=""
 WITH_CKPT=0
 WITH_EPOCHS=0
 WITH_DATA=0
@@ -48,6 +49,8 @@ usage() {
   --gan DIR          GAN 训练目录（含 hparams.json / loss.csv）
   --vae DIR          VAE 训练目录
   --eval DIR         评估目录（含 results.json / report.md）
+  --runs DIR         结果根目录，在此下面自动查找（默认依次尝试
+                     runs/、../runs、/root/autodl-tmp/runs 等）
   --data DIR         附带数据集的 meta.json 与 preview.png
   --out NAME         输出包名，默认 results_<时间戳>
   --with-ckpt        打包 last.pt 与 best.pt（每个 70~90 MB）
@@ -76,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --vae)         need_val "$@"; VAE_DIR="$2";  shift 2 ;;
     --eval)        need_val "$@"; EVAL_DIR="$2"; shift 2 ;;
     --data)        need_val "$@"; DATA_DIR="$2"; WITH_DATA=1; shift 2 ;;
+    --runs)        need_val "$@"; RUNS_DIR="$2"; shift 2 ;;
     --out)         need_val "$@"; OUT_NAME="$2"; shift 2 ;;
     --with-ckpt)   WITH_CKPT=1; shift ;;
     --with-epochs) WITH_CKPT=1; WITH_EPOCHS=1; shift ;;
@@ -93,20 +97,33 @@ looks_like_gan()  { [[ -f "$1/hparams.json" ]] && grep -q '"model": *"dcgan"'   
 looks_like_vae()  { [[ -f "$1/hparams.json" ]] && grep -q '"model": *"convvae"' "$1/hparams.json" 2>/dev/null; }
 looks_like_eval() { [[ -f "$1/results.json" ]]; }
 
-# 先试给定目录本身，再试它下面一层子目录
-autodetect() {  # $1 = 判断函数名, $2 = 额外候选目录（可为空）
-  local fn="$1" extra="${2:-}"
+# 候选根目录：脚本所在目录下的 runs/，以及 AutoDL 常见的 /root/autodl-tmp 等。
+# 训练产物通常不在代码目录里（数据盘挂载在别处），所以必须往外找。
+runs_roots() {
+  local r
+  [[ -n "$RUNS_DIR" ]] && printf '%s\n' "$RUNS_DIR"
+  for r in runs ../runs ../../runs \
+           autodl-tmp/runs ../autodl-tmp/runs ../../autodl-tmp/runs \
+           "${HOME:-/root}/autodl-tmp/runs" /root/autodl-tmp/runs \
+           autodl-tmp ../autodl-tmp "${HOME:-/root}/autodl-tmp" /root/autodl-tmp \
+           output out results; do
+    [[ -d "$r" ]] && printf '%s\n' "$r"
+  done
+  return 0
+}
+
+# 先试候选根目录本身，再试它下面一层子目录
+autodetect() {  # $1 = 判断函数名
+  local fn="$1"
   local -a cands=()
-  [[ -n "$extra" ]] && cands+=("$extra")
-  local base
-  for base in runs output out results; do
+  local base sub
+  while IFS= read -r base; do
     [[ -d "$base" ]] || continue
     cands+=("$base")
-    local sub
     for sub in "$base"/*/; do
       [[ -d "$sub" ]] && cands+=("${sub%/}")
     done
-  done
+  done < <(runs_roots)
   local d
   for d in ${cands[@]+"${cands[@]}"}; do
     [[ -d "$d" ]] || continue
@@ -114,10 +131,6 @@ autodetect() {  # $1 = 判断函数名, $2 = 额外候选目录（可为空）
   done
   return 1
 }
-
-if [[ -z "$EVAL_DIR" ]] && looks_like_eval "runs/eval"; then
-  EVAL_DIR="runs/eval"
-fi
 
 # ---------------------------------------------------------------- 校验
 say "检查输入目录"
@@ -143,11 +156,20 @@ check_dir VAE  "$VAE_DIR"  "loss.csv"
 check_dir EVAL "$EVAL_DIR" "results.json"
 
 if [[ "$found_any" -eq 0 ]]; then
-  err "没有找到任何结果目录。请用 --gan / --vae / --eval 指定，例如："
-  err "  bash collect_results.sh --gan runs/gan64 --vae runs/vae64 --eval runs/eval"
+  err "没有找到任何结果目录。请用 --runs / --gan / --vae / --eval 指定，例如："
+  err "  bash collect_results.sh --runs /root/autodl-tmp/runs"
   echo >&2
-  echo "   当前目录 $(pwd) 下的候选：" >&2
-  ls -d runs/*/ 2>/dev/null | sed 's/^/     /' >&2 || echo "     (没有 runs/ 目录)" >&2
+  echo "   当前目录：$(pwd)" >&2
+  echo "   查找过的路径（只列存在的）：" >&2
+  local_roots="$(runs_roots 2>/dev/null)"
+  if [[ -n "$local_roots" ]]; then
+    printf '%s\n' "$local_roots" | sed 's/^/     /' >&2
+  else
+    echo "     （无）" >&2
+  fi
+  echo >&2
+  echo "   若训练产物在其他路径，用 --runs 指定其父目录，或直接指定三类目录：" >&2
+  echo "     --gan <GAN输出目录> --vae <VAE输出目录> --eval <评估输出目录>" >&2
   exit 1
 fi
 
@@ -231,11 +253,28 @@ if [[ "$WITH_CKPT" -eq 1 ]]; then
 fi
 
 # ---- 数据元信息（很小，但能说明用了多少数据）----
-if [[ "$WITH_DATA" -eq 1 && -d "$DATA_DIR" ]]; then
-  for f in meta.json preview.png; do
-    copy_if "$DATA_DIR/$f" "$STAGE/data/$f"
+# 未显式指定时，跟随数据目录自动找（meta.json 里记着图片数与划分来源）。
+# 数据通常放在 <root>/data/celeba64/ 这样的两级结构里，故也查下一层。
+if [[ "$WITH_DATA" -eq 0 ]]; then
+  for d in data ../data ../../data autodl-tmp/data ../autodl-tmp/data \
+           "${HOME:-/root}/autodl-tmp/data" /root/autodl-tmp/data; do
+    [[ -d "$d" ]] || continue
+    if [[ -f "$d/meta.json" ]]; then DATA_DIR="$d"; WITH_DATA=1; break; fi
+    hit="$(find "$d" -maxdepth 2 -name meta.json -print -quit 2>/dev/null || true)"
+    if [[ -n "$hit" ]]; then
+      DATA_DIR="$(dirname "$hit")"; WITH_DATA=1; break
+    fi
   done
-  echo "   data/    meta.json + preview.png"
+fi
+if [[ "$WITH_DATA" -eq 1 ]]; then
+  if [[ -d "$DATA_DIR" ]]; then
+    for f in meta.json preview.png; do
+      copy_if "$DATA_DIR/$f" "$STAGE/data/$f"
+    done
+    echo "   data/    meta.json + preview.png（来自 $DATA_DIR）"
+  else
+    warn "--data 指定的目录不存在: $DATA_DIR"
+  fi
 fi
 
 # ---------------------------------------------------------------- 环境信息
