@@ -448,6 +448,41 @@ scp -r user@server:~/celeba/runs/eval ./runs_eval
 先确认训练轮数够不够（GAN 至少 20~30 epoch 才有形状），
 再看 `runs/gan64/loss.csv` 里 D 和 G 的损失是否还在正常范围。
 
+**GPU 占用只有 50%、显存只用了 1 GB，是不是没跑满？**
+
+正常。64px 的 DCGAN 只有 5.65 M 参数（G 2.88 M + D 2.77 M），
+权重 + Adam 状态 + EMA 不到 100 MB，加 CUDA context 和激活值，
+1 GB 出头就是全部家当。4090D 的 24 GB 有 23 GB 闲着，是模型形状决定的。
+
+占用 50% 是因为这个分辨率下 kernel 只有几十微秒，GPU 大部分时间在等
+下一个 kernel 派发（launch-bound），不是数据没喂上。判断方法：
+
+```bash
+watch -n 1 nvidia-smi
+```
+
+- 占用 30~60% 稳定不抖 → launch-bound，正常
+- 占用 5~20% 剧烈抖动、`top` 里 python CPU 很高 → data-bound，加 `--num-workers`
+- 占用 90%+ → 已经满了
+
+按 40 秒/轮算，162079 张 ÷ 1266 step ≈ 31.6 ms/step ≈ 4000 张/秒，
+30 轮 20 分钟跑完。**这个速度对 64px DCGAN 是正常的。**
+
+真想压榨显卡，按性价比：
+
+```bash
+# 1) 加大 batch（最省事），注意 lr 要跟着调
+--batch-size 512 --lr 4e-4
+
+# 2) 升到 128 分辨率（真正吃满算力，但慢 4~6 倍）
+python prepare_data.py --root /root/autodl-pub/CelebA \
+    --out /root/autodl-tmp/data/celeba128 --size 128 --workers 8
+--batch-size 128 --ngf 128 --ndf 128 --amp
+```
+
+完整说明见项目 README 第 2.1 节「性能调优」。
+**但对这个实验来说，占用 50% 还是 90% 不影响最终的 PSNR/SSIM 数字。**
+
 **指标和 README 里的预期差很多**
 README 第 5 节的区间是 30 epoch 量级的经验值，实际受数据量、超参影响。
 以 `results.json` 为准，并在报告里说明训练配置。

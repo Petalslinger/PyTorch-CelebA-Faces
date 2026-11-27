@@ -95,7 +95,7 @@ python prepare_data.py --src ./img_align_celeba \
 ## 2. 训练
 
 ```bash
-# DCGAN（30 epoch，128 batch，4060 上约 1.5~2 小时）
+# DCGAN（30 epoch，128 batch；4090D 上约 20 分钟，4060 笔记本约 1 小时）
 python train_gan.py --data data/celeba64 --out runs/gan64 \
     --epochs 30 --batch-size 128 --lr 2e-4 --amp
 
@@ -116,6 +116,129 @@ python train_vae.py --data data/celeba64 --out runs/vae64 \
 | GAN 模式崩塌（样本雷同） | 保持 `--ema-decay 0.999`；减少 `--n-critic`；适当降 lr |
 | VAE 重建太糊 | 降 `--beta`（如 0.5）或用 `--recon l1` |
 | VAE 后验塌缩（KL≈0） | 用 `--kl-warmup 5~10`；或减小 `--latent-dim` |
+
+## 2.1 性能调优
+
+### 先判断瓶颈在哪，别瞎调
+
+跑起来之后另开一个终端：
+
+```bash
+watch -n 1 nvidia-smi
+```
+
+看三列：**GPU-Util**（算力占用）、**Memory-Used**（显存）、**GPU 名字**。
+
+| 现象 | 含义 | 该怎么办 |
+| --- | --- | --- |
+| 占用 30~60%，稳定不抖 | **launch-bound**：GPU 算得很快，大部分时间在等下一个 kernel 派发 | 加大 batch、提高分辨率（见下） |
+| 占用 5~20%，剧烈抖动，`top` 里 python 的 CPU 很高 | **data-bound**：数据加载跟不上 | 加 `--num-workers`；确认 `.npy` 在本地盘 |
+| 占用 90%+，显存也快满 | 已经吃满了 | 别调了，调小一点防止 OOM |
+| 显存只用了 1 GB 但占用 50% | 正常 | 这个模型就只需要这么多显存 |
+
+**关键认知：显存占用低 ≠ 浪费。** 64×64 的 DCGAN 一共 5.65 M 参数（G 2.88 M + D 2.77 M），
+权重 + Adam 状态 + EMA 加起来不到 100 MB，加 CUDA context 和激活值，1 GB 出头就是全部家当。
+24 GB 的卡有 23 GB 闲着是模型的形状决定的，不是参数没调好。
+
+**另一种常见误判：** `torch.cuda.Util` 这类工具报的占用是"采样时刻是否有 kernel 在跑"。
+kernel 只有几十微秒、中间有空隙，采样就容易读到 50% 上下。真实利用率要看
+`nvidia-smi dmon` 的平均值，或者直接看"每轮训练要多久"这个端到端指标。
+
+### 真正能提速的四个旋钮（按性价比排序）
+
+#### ① 加大 batch（最简单）
+
+batch 越大，每个 kernel 的活越多，启动开销摊得越薄。
+
+```bash
+# 64px 下 batch 512 大约吃 2~3 GB 显存
+python train_gan.py --data data/celeba64 --out runs/gan64 \
+    --epochs 30 --batch-size 512 --lr 4e-4 --amp --save-every 5
+```
+
+⚠️ **batch 变大后学习率要跟着调**。经验做法是线性缩放：batch 从 128 到 512（4 倍），
+`--lr` 从 2e-4 到 8e-4 是激进版，4e-4 是保守版。GAN 建议先用 4e-4 试，
+如果 D 损失震荡厉害就退回 2e-4。**不要只改 batch 不改 lr**，否则收敛会明显变慢。
+
+#### ② 提高分辨率（真正吃满算力的办法）
+
+64px 的特征图最大才 64×64，卷积核在上面跑不满一个 SM。升到 128px 后
+特征图面积 ×4、参数量 ×10，显存能到 4~6 GB，占用自然上去。
+
+```bash
+# 先转 128 的数据（约 8 GB npy，注意磁盘）
+python prepare_data.py --root /root/autodl-pub/CelebA \
+    --out /root/autodl-tmp/data/celeba128 --size 128 --workers 8
+
+python train_gan.py --data /root/autodl-tmp/data/celeba128 \
+    --out /root/autodl-tmp/runs/gan128 \
+    --epochs 30 --batch-size 128 --ngf 128 --ndf 128 --amp --save-every 5
+```
+
+**但要想清楚值不值**：每轮慢 4~6 倍，30 轮从 20 分钟变成 1.5~2 小时。
+好处是 128px 的人脸五官才看得清，64px 是糊的。**如果报告里要放对比图，128px 观感好得多**；
+如果只是验证"GAN 和 VAE 谁能生成人脸"这个方法对比，64px 就够。
+
+#### ③ 混合精度 `--amp`（已经默认开了）
+
+`run_all.sh` 里 GAN 和 VAE 都带 `--amp`。它把卷积和矩阵乘跑在 fp16，
+理论 2 倍加速、显存减半。**已经开着就别再动了**，这是本仓库唯一"必须开"的性能选项。
+
+#### ④ DataLoader 的 `--num-workers`
+
+默认 4。如果 `nvidia-smi` 显示占用低于 30% 且抖动，先怀疑这里：
+
+```bash
+--num-workers 8      # 数据盘是本地 SSD 时
+--num-workers 0      # 容器禁多进程时（会变慢，但至少能跑）
+```
+
+AutoDL 的 `/root/autodl-tmp` 是本地盘，8 个 worker 一般没问题。
+`/root/autodl-pub` 是网络挂载，**不要**从那里直接读图片训练（要先 `prepare_data.py` 转成 npy）。
+
+### 已经做了的优化（不用你再改）
+
+代码里这些是默认生效的：
+
+| 优化 | 位置 | 效果 |
+| --- | --- | --- |
+| `pin_memory=True` | `dataset.py` | CPU→GPU 拷贝走异步，配合 `non_blocking=True` |
+| `persistent_workers=True` | `dataset.py` | worker 不每轮重建，省 fork 开销 |
+| `prefetch_factor=2` | `dataset.py` | 提前取 2 个 batch |
+| `cudnn.benchmark=True` | `utils.py:48` `setup_cudnn()` | 输入尺寸固定时自动选最快的卷积算法 |
+| `zero_grad(set_to_none=True)` | 两个训练脚本 | 少一次显存写，小模型上也能省 2~3% |
+| `torch.no_grad()` 包 D 步的 G 前向 | `train_gan.py:211` | D 步不需要 G 的计算图，省约 40% 显存 |
+| EMA 用独立 `sampler` 模型 | `train_gan.py:189` | 采样不污染训练模型的 BN 状态 |
+
+### 想再进一步（可选，收益递减）
+
+**去掉每步的 `.item()` 同步。** `train_gan.py:237-238` 每步调两次
+`loss_d.item()` / `loss_g.item()`，每次都会强制 CUDA 同步等 GPU 算完，
+打断了"连续派发 kernel"的流水线。改成在 GPU 上累加、每 50 步同步一次能省 5~10%。
+但改动会碰训练主循环，**不建议在正式跑之前动**。
+
+**`torch.compile`。** 小模型上收益明显（合并算子、减少启动次数），
+但首次编译要 1~2 分钟，而且 Windows 上经常编不过。
+
+```python
+G = torch.compile(G)   # 在 train_gan.py 第 127 行之后加
+D = torch.compile(D)
+```
+
+风险：可能报 `TorchDynamo` 相关错误、checkpoint 的 key 名会带 `_orig_mod.` 前缀导致
+`evaluate.py` 加载失败。**要用就先跑冒烟测试确认整条链路能过。**
+
+### 什么时候不该优化
+
+这个实验是 **64px CelebA、30 轮、出一组 PSNR/SSIM 对比图和结论**。
+按 40 秒/轮算，全量 30 轮 20 分钟就跑完了。**GPU 占用 50% 还是 90%，对最终的
+PSNR/SSIM 数字没有任何影响。** 把时间花在看生成质量、写报告结论上，比调 GPU 占用有价值得多。
+
+只有当出现下面情况时才值得调：
+
+- 一轮超过 5 分钟（说明哪里不对，先查是不是用了 `--num-workers 0` 或 CPU）
+- 显存 OOM（反过来，要**降** batch）
+- 想升分辨率做更高质量的对比图
 
 ## 3. 评估
 
