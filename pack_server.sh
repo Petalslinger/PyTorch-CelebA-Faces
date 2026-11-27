@@ -52,10 +52,21 @@ say "写入 VERSION"
 cat "$DEST/VERSION" | sed 's/^/   /'
 
 say "语法检查"
-PY=${PY:-python}
+# 找一个真正能跑的解释器：Windows 上 python 往往是 Microsoft Store 的占位符，
+# command -v 能查到但一执行就报 "Python was not found"，所以必须实际试跑一次。
+PY_OK=""
+for cand in "${PY:-}" python3 python \
+            "$HOME/anaconda3/envs/machinelearn/python.exe" \
+            "$HOME/miniconda3/bin/python" "$HOME/anaconda3/bin/python"; do
+  [ -n "$cand" ] || continue
+  if command -v "$cand" >/dev/null 2>&1 && "$cand" -c "import sys" >/dev/null 2>&1; then
+    PY_OK="$cand"; break
+  fi
+done
 export PYTHONIOENCODING=utf-8
-if command -v "$PY" >/dev/null 2>&1; then
-  ( cd "$DEST" && "$PY" - <<'PYEOF'
+if [ -n "$PY_OK" ]; then
+  echo "   解释器: $PY_OK"
+  ( cd "$DEST" && "$PY_OK" - <<'PYEOF'
 import pathlib, py_compile, sys
 bad = 0
 for p in sorted(pathlib.Path(".").rglob("*.py")):
@@ -75,7 +86,7 @@ PYEOF
   bash -n "$DEST/run_all.sh"   && echo "   run_all.sh 语法通过"
   bash -n "$DEST/collect_results.sh" && echo "   collect_results.sh 语法通过"
 else
-  echo "   跳过（找不到 python: $PY）"
+  echo "   [警告] 找不到可用的 python，跳过 .py 语法检查（脚本本身的 bash -n 仍会执行）"
 fi
 
 say "完成"
