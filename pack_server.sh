@@ -20,6 +20,7 @@ FILES=(
   evaluate.py
   smoke_test.sh
   run_all.sh
+  collect_results.sh
   requirements.txt
 )
 MODELS=(models/__init__.py models/gan.py models/vae.py)
@@ -72,6 +73,7 @@ PYEOF
   ) || { echo "语法检查失败" >&2; exit 1; }
   bash -n "$DEST/smoke_test.sh" && echo "   smoke_test.sh 语法通过"
   bash -n "$DEST/run_all.sh"   && echo "   run_all.sh 语法通过"
+  bash -n "$DEST/collect_results.sh" && echo "   collect_results.sh 语法通过"
 else
   echo "   跳过（找不到 python: $PY）"
 fi

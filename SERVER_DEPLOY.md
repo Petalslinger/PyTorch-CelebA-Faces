@@ -147,12 +147,16 @@ python evaluate.py \
 ### 步骤 9：取回结果
 
 ```bash
-# 本地执行
-scp -r root@你的实例IP:/root/autodl-tmp/runs/eval64 ./runs_eval
+# 服务器端：打包（自动探测 runs/ 下的 GAN、VAE 与评估目录）
+cd /root/autodl-tmp && bash collect_results.sh
+
+# 本地执行：下载并解压
+scp root@你的实例IP:/root/autodl-tmp/results_*.tar.gz ./
+tar -xzf results_*.tar.gz
 ```
 
-报告所需文件为 `runs_eval/` 下的 `report.md`、`results.json` 及若干
-`compare_*.png`，详见第 7 节。
+压缩包内含 `report.md`、`results.json`、全部 `compare_*.png` 与一份
+说明指标口径的 `README.txt`，详见第 7 节。
 
 ### 完整命令序列（数据已转换的情况下）
 
@@ -169,6 +173,9 @@ ROOT=/root/autodl-pub/CelebA FULL=1 \
   EVAL_OUT=/root/autodl-tmp/runs/eval64 \
   bash run_all.sh 2>&1 | tee /root/autodl-tmp/all.log
 # 按 Ctrl+B 后按 D 退出
+
+# 训练与评估完成后取回结果
+cd /root/autodl-tmp && bash collect_results.sh
 ```
 
 ---
@@ -401,6 +408,52 @@ python evaluate.py --data data/celeba64 --out runs/eval \
 
 ## 7. 取回结果
 
+### 7.1 一键打包（推荐）
+
+`collect_results.sh` 会自动探测 `runs/` 下的 GAN、VAE 与评估目录，把写报告所需的
+文件整理成一个带说明的压缩包：
+
+```bash
+bash collect_results.sh
+```
+
+脚本输出形如 `results_20261127_153012.tar.gz`，体积通常在 1~10 MB（取决于样本图数量）。
+包内结构：
+
+```
+results_<时间戳>/
+├── README.txt      结果说明与指标口径（可直接用于撰写报告）
+├── MANIFEST.txt    文件清单（大小 + md5，用于校验传输完整性）
+├── env.txt         运行环境（GPU 型号、torch 与 CUDA 版本）
+├── VERSION         打包时的代码版本
+├── eval/           report.md、results.json 与全部对比图
+├── gan/            loss.csv、train_summary.json、samples/
+└── vae/            同上
+```
+
+常用选项：
+
+```bash
+bash collect_results.sh --with-ckpt      # 附带 last.pt / best.pt（每个 70~90 MB）
+bash collect_results.sh --with-epochs    # 附带全部 epoch_*.pt（体积很大）
+bash collect_results.sh --data data/celeba64   # 附带 meta.json 与 preview.png
+bash collect_results.sh --gan runs/gan64 --vae runs/vae64 --eval runs/eval   # 显式指定
+bash collect_results.sh --out 第一轮64px  # 自定义包名
+```
+
+随后下载到本地：
+
+```bash
+# 本地执行
+scp user@server:~/celeba/results_20261127_153012.tar.gz ./
+tar -xzf results_20261127_153012.tar.gz
+```
+
+检查点体积较大，仅在需要复现或继续训练时取回。评估所需的图表与
+`report.md` 均不依赖检查点。
+
+### 7.2 手动取回
+
 ```bash
 # 本地执行
 scp -r user@server:~/celeba/runs/eval ./runs_eval
@@ -510,3 +563,4 @@ README 第 5 节给出的区间为 30 epoch 量级的经验值，实际结果受
 | `evaluate.py` | 定量与定性评估，自动生成结论 |
 | `smoke_test.sh` | 冒烟测试 |
 | `run_all.sh` | 一键完整流程 |
+| `collect_results.sh` | 收集训练与评估产物，打包下载 |

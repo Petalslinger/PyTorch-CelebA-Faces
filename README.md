@@ -17,7 +17,10 @@
 ├── train_gan.py        # DCGAN 训练
 ├── train_vae.py        # ConvVAE 训练
 ├── evaluate.py         # 定量 + 定性 + 自动生成结论草稿
-└── run_all.sh          # 一键执行完整流程
+├── run_all.sh          # 一键执行完整流程
+├── smoke_test.sh       # 冒烟测试（环境/数据/模型/评估全链路）
+├── collect_results.sh  # 收集训练与评估产物，打包下载
+└── pack_server.sh      # 归集服务器运行包到 server/
 ```
 
 ## 0. 环境
@@ -342,6 +345,35 @@ bash run_all.sh            # 数据准备(5k 子集) -> 训练 -> 评估
 FULL=1 bash run_all.sh     # 全量数据 + 30 epoch
 EPOCHS=50 BATCH=128 bash run_all.sh
 ```
+
+### 4.3 收集结果
+
+训练与评估完成后，将产物整理成一个便于下载的压缩包：
+
+```bash
+bash collect_results.sh
+```
+
+脚本会自动探测 `runs/` 下的 GAN、VAE 与评估目录，输出
+`results_<时间戳>.tar.gz`（通常 1~10 MB）。包内除图表外还包含：
+
+| 文件 | 内容 |
+| --- | --- |
+| `README.txt` | 结果说明与指标口径，可直接用于撰写报告 |
+| `MANIFEST.txt` | 文件清单（大小 + md5），用于校验传输完整性 |
+| `env.txt` | 运行环境（GPU 型号、torch 与 CUDA 版本） |
+| `VERSION` | 打包时的代码版本 |
+
+常用选项：
+
+```bash
+bash collect_results.sh --with-ckpt             # 附带 last.pt / best.pt
+bash collect_results.sh --data data/celeba64    # 附带 meta.json 与 preview.png
+bash collect_results.sh --gan runs/gan64 --vae runs/vae64 --eval runs/eval
+```
+
+检查点体积较大（每个 70~90 MB），仅在需要复现或继续训练时取回；
+评估图表与 `report.md` 均不依赖检查点。
 
 ## 5. 预期结果（64×64，30 epoch 量级，供对照）
 

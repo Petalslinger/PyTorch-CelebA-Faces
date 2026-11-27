@@ -15,6 +15,9 @@ _smoke/
 server/
 server_bundle.tar.gz
 
+# collect_results.sh 生成的打包结果
+results_*.tar.gz
+
 # Python
 __pycache__/
 *.py[cod]
