@@ -12,6 +12,166 @@
 
 ---
 
+## 0. 完整命令（从零到出结果）
+
+如果只想照着敲、不想读后面的说明，用这一节就够了。
+假设是 **AutoDL**：conda 在 `/root/miniconda3`，公共数据集在
+`/root/autodl-pub/CelebA`，输出写 `/root/autodl-tmp`（系统盘只有 30 G）。
+
+### 步骤 1：本地打包上传
+
+```bash
+# 在本地项目根目录 PyTorch-CelebA-Faces/ 下执行
+bash pack_server.sh --tar
+scp server_bundle.tar.gz root@你的实例IP:~/
+```
+
+### 步骤 2：服务器上解压
+
+```bash
+ssh root@你的实例IP
+
+cd ~
+tar -xzf server_bundle.tar.gz
+cd server
+cat VERSION            # 确认 commit 是你刚打的包
+```
+
+### 步骤 3：确认 python 环境
+
+AutoDL 镜像一般已经装好 torch，先看一眼：
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+
+- 打印出 `True` 和显卡名字 → 跳过步骤 4，直接进步骤 5。
+- 报 `No module named 'torch'` → 做步骤 4。
+
+### 步骤 4：（仅当没有 torch 时）装环境
+
+```bash
+conda create -n celeba python=3.10 -y
+conda activate celeba
+
+# 按 nvidia-smi 右上角的 CUDA Version 选，下面以 12.1 为例
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+pip install -r requirements.txt
+
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+### 步骤 5：转换数据（约 5~15 分钟）
+
+先 dry-run 确认路径检测正确：
+
+```bash
+python prepare_data.py --root /root/autodl-pub/CelebA --out /root/autodl-tmp/data/celeba64 --dry-run
+```
+
+输出里应该看到 `图片源: 压缩包 Img/img_align_celeba.zip（无需解压，直接读）`，
+然后正式转换：
+
+```bash
+python prepare_data.py --root /root/autodl-pub/CelebA --out /root/autodl-tmp/data/celeba64 --size 64 --workers 8
+```
+
+产出 `/root/autodl-tmp/data/celeba64/{train,val,test}.npy`（合计约 2.5 GB）和
+`preview.png`、`meta.json`。
+
+### 步骤 6：冒烟测试（几分钟）
+
+```bash
+bash smoke_test.sh
+```
+
+看到 **「冒烟测试通过」** 再往下走。它会自动找到装了 torch 的 python，
+不用手动指定 `PY`。跑完清理：
+
+```bash
+rm -rf _smoke
+```
+
+### 步骤 7：正式训练（放后台）
+
+```bash
+tmux new -s celeba
+```
+
+在 tmux 里：
+
+```bash
+cd ~/server
+
+python train_gan.py --data /root/autodl-tmp/data/celeba64 \
+    --out /root/autodl-tmp/runs/gan64 \
+    --epochs 30 --batch-size 128 --amp --save-every 5 \
+    2>&1 | tee /root/autodl-tmp/gan.log
+
+python train_vae.py --data /root/autodl-tmp/data/celeba64 \
+    --out /root/autodl-tmp/runs/vae64 \
+    --epochs 30 --batch-size 128 --lr 1e-3 --kl-warmup 5 --amp --save-every 5 \
+    2>&1 | tee /root/autodl-tmp/vae.log
+```
+
+按 `Ctrl+B` 然后按 `D` 退出 tmux，训练继续在后台跑。
+回来查看：`tmux attach -t celeba`。
+
+> 想一条命令跑完全程（数据已转好时）：
+> ```bash
+> ROOT=/root/autodl-pub/CelebA FULL=1 \
+>   DATA=/root/autodl-tmp/data/celeba64 \
+>   GAN_OUT=/root/autodl-tmp/runs/gan64 \
+>   VAE_OUT=/root/autodl-tmp/runs/vae64 \
+>   EVAL_OUT=/root/autodl-tmp/runs/eval64 \
+>   bash run_all.sh 2>&1 | tee /root/autodl-tmp/all.log
+> ```
+
+### 步骤 8：评估
+
+```bash
+cd ~/server
+
+python evaluate.py \
+    --data /root/autodl-tmp/data/celeba64 \
+    --out  /root/autodl-tmp/runs/eval64 \
+    --gan  /root/autodl-tmp/runs/gan64 \
+    --vae  /root/autodl-tmp/runs/vae64 \
+    --split test --n-samples 2048 --inversion-n 64 --inversion-steps 300 --fid
+```
+
+`--fid` 首次会下载 Inception-v3（约 100 MB），不想等就去掉这个参数。
+
+### 步骤 9：取回结果
+
+```bash
+# 本地执行
+scp -r root@你的实例IP:/root/autodl-tmp/runs/eval64 ./runs_eval
+```
+
+报告要用的就是 `runs_eval/` 里的 `report.md`、`results.json` 和几张
+`compare_*.png`，详见第 7 节。
+
+### 全部命令连成一段（数据已转好的情况下）
+
+```bash
+ssh root@你的实例IP
+cd ~ && tar -xzf server_bundle.tar.gz && cd server
+bash smoke_test.sh && rm -rf _smoke
+tmux new -s celeba
+# —— 进入 tmux 后 ——
+ROOT=/root/autodl-pub/CelebA FULL=1 \
+  DATA=/root/autodl-tmp/data/celeba64 \
+  GAN_OUT=/root/autodl-tmp/runs/gan64 \
+  VAE_OUT=/root/autodl-tmp/runs/vae64 \
+  EVAL_OUT=/root/autodl-tmp/runs/eval64 \
+  bash run_all.sh 2>&1 | tee /root/autodl-tmp/all.log
+# Ctrl+B 然后 D 退出
+```
+
+---
+
 ## 1. 上传到服务器
 
 在**本地**项目根目录执行：
@@ -153,8 +313,10 @@ GAN 与 VAE 能否前向反向并存检查点、评估能否产出全部图。
 N=5000 STEPS=200 bash smoke_test.sh    # 多看一点
 SIZE=128 bash smoke_test.sh            # 顺便验证 128 分辨率
 WORKERS=4 bash smoke_test.sh           # 强制多进程
-PY=/opt/conda/envs/celeba/bin/python bash smoke_test.sh
+PY=$(which python) bash smoke_test.sh  # 强制用当前环境的 python
 ```
+
+脚本默认会自动探测解释器（优先带 CUDA 的），一般不用指定 `PY`。
 
 ## 5. 正式训练
 
