@@ -22,7 +22,7 @@ from pathlib import Path
 import torch
 
 from dataset import build_loader
-from models.vae import ConvVAE
+from models.vae import ConvVAE, elbo_loss
 from utils import (
     AverageMeter,
     autocast,
@@ -134,9 +134,12 @@ def main() -> None:
             real = real.to(device, non_blocking=True)
             with autocast(scaler.is_enabled()):
                 recon, mu, logvar, _ = model(real, sample=True)
-                rec = model.recon_loss_per_sample(recon, real, args.recon).mean()
-                kl = model.kl_per_sample(mu, logvar).mean()
-                loss = rec + beta * kl
+                # rec / kl 都是逐样本 [B]，均为"求和"口径后除以像素数（见 models/vae.py）
+                per_sample, rec_s, kl_s = elbo_loss(
+                    recon, real, mu, logvar, beta=beta, kind=args.recon
+                )
+                loss = per_sample.mean()
+                rec_px, kl_px = rec_s.mean(), kl_s.mean()
 
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -146,13 +149,13 @@ def main() -> None:
             scaler.update()
 
             m_tot.update(loss.item(), real.size(0))
-            m_rec.update(rec.item(), real.size(0))
-            m_kl.update(kl.item(), real.size(0))
-
+            m_rec.update(rec_px.item(), real.size(0))
+            m_kl.update(kl_px.item(), real.size(0))
             if args.log_every > 0 and (step + 1) % args.log_every == 0:
                 print(f"[{epoch:03d}][{step + 1:04d}/{steps_per_epoch}] "
-                      f"loss={m_tot.avg:.2f} recon={m_rec.avg:.2f} kl={m_kl.avg:.1f} "
-                      f"beta={beta:.2f} {human_time(time.time() - t_epoch)}")
+                      f"loss={m_tot.avg:.4f} mse/px={m_rec.avg:.4f} "
+                      f"kl/px={m_kl.avg:.5f} beta={beta:.2f} "
+                      f"{human_time(time.time() - t_epoch)}")
 
         scheduler.step()
 
@@ -172,8 +175,9 @@ def main() -> None:
         lr_now = opt.param_groups[0]["lr"]
         csv_log.log(epoch=epoch, step=steps_per_epoch, loss=m_tot.avg, recon=m_rec.avg,
                     kl=m_kl.avg, beta=beta, psnr_epoch=psnr_epoch, lr=lr_now)
-        print(f"== epoch {epoch:03d}  loss={m_tot.avg:.2f}  recon={m_rec.avg:.2f}  "
-              f"kl={m_kl.avg:.1f}  beta={beta:.2f}  recon_PSNR={psnr_epoch:.2f}dB  "
+        print(f"== epoch {epoch:03d}  loss={m_tot.avg:.4f}  mse/px={m_rec.avg:.4f}  "
+              f"kl/px={m_kl.avg:.5f}  beta={beta:.2f}  "
+              f"recon_PSNR={psnr_epoch:.2f}dB  "
               f"用时 {human_time(time.time() - t_epoch)}  累计 {timer}")
 
         # ---- 存样本：先验采样 + 训练集前 8 张的重建 ----
@@ -183,9 +187,29 @@ def main() -> None:
             real8, _ = next(iter(train_loader))
             real8 = real8[:8].to(device)
             rec8 = model.reconstruct(real8)
-            # 上排真实、下排重建，方便直观对比
-            pair = torch.cat([real8, rec8], dim=0)
+            # 上排真实、下排重建，方便直观对比。
+            # 两边都要先转 [0,1]：save_grid 只看最小值判断范围，
+            # 混进 [-1,1] 的真实图会让它把整张图再 to01 一次，重建就被洗白了。
+            pair = torch.cat([to01(real8), to01(rec8)], dim=0)
             save_grid(pair, out_dir / "samples" / f"recon_{epoch:03d}.png", nrow=8)
+
+            # 后验塌缩自检：把 8 张不同输入的重建两两比一比。
+            # 若解码器退化成"平均脸"，这个数会趋近 0（第一次训练就是 0.0000）。
+            # 口径与 evaluate.py 的 diversity 一致：两两平均绝对差，再除以真实图的同值。
+            if rec8.size(0) > 1:
+                rec01, gt01 = to01(rec8), to01(real8)
+                n_pair, rec_sum, gt_sum = 0, 0.0, 0.0
+                for i in range(rec01.size(0)):
+                    for j in range(i + 1, rec01.size(0)):
+                        rec_sum += float((rec01[i] - rec01[j]).abs().mean())
+                        gt_sum += float((gt01[i] - gt01[j]).abs().mean())
+                        n_pair += 1
+                rec_spread, gt_spread = rec_sum / n_pair, gt_sum / n_pair
+                ratio = rec_spread / gt_spread if gt_spread > 0 else float("nan")
+                if ratio < 0.10:
+                    print(f"      [警告] epoch {epoch:03d} 重建多样性只有真实图的 "
+                          f"{ratio * 100:.1f}%（{rec_spread:.4f} vs {gt_spread:.4f}），"
+                          f"疑似后验塌缩：解码器输出与输入无关。")
 
         state = {"epoch": epoch, "model": model.state_dict(), "opt": opt.state_dict(),
                  "hparams": hparams}
