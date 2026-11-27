@@ -4,8 +4,10 @@
 # 用法：
 #   bash run_all.sh                              # 默认 5k 子集 + 20 epoch（快速验证）
 #   FULL=1 bash run_all.sh                       # 全量数据 + 30 epoch
+#   CLEAN=1 FULL=1 bash run_all.sh               # 全部重训：先删旧输出目录
 #   EPOCHS=50 BATCH=128 bash run_all.sh
 #   WORKERS=0 bash run_all.sh                    # 容器禁止多进程时
+#   FID=1 bash run_all.sh                        # 评估时额外算 FID
 #
 # 数据来源（三者互斥，按顺序自动探测）：
 #   ROOT=/root/autodl-pub/CelebA bash run_all.sh   # 官方目录（AutoDL 公共数据集）
@@ -19,10 +21,19 @@ SIZE=${SIZE:-64}
 BATCH=${BATCH:-128}
 EPOCHS=${EPOCHS:-20}
 WORKERS=${WORKERS:-4}
+SAVE_EVERY=${SAVE_EVERY:-5}
 DATA=${DATA:-data/celeba${SIZE}}
 GAN_OUT=${GAN_OUT:-runs/gan${SIZE}}
 VAE_OUT=${VAE_OUT:-runs/vae${SIZE}}
 EVAL_OUT=${EVAL_OUT:-runs/eval${SIZE}}
+# 评估参数（与报告口径相关，不要随意调小）
+EVAL_N=${EVAL_N:-2048}
+INV_N=${INV_N:-64}
+INV_STEPS=${INV_STEPS:-300}
+# CLEAN=1：训练前删除旧的输出目录，用于"全部重训"
+CLEAN=${CLEAN:-0}
+# FID=1：额外计算 FID（首次需联网下载 Inception 权重约 100 MB）
+FID=${FID:-0}
 
 # 找一个能 import torch 的 python（AutoDL 的 conda 在 /root/miniconda3，不写死路径）
 resolve_python() {
@@ -100,17 +111,33 @@ EOF
 fi
 
 echo "== 2/4 训练 DCGAN =="
+if [[ "${CLEAN}" == "1" && -d "${GAN_OUT}" ]]; then
+  echo "   CLEAN=1，删除旧目录 ${GAN_OUT}"
+  rm -rf "${GAN_OUT}"
+fi
 $PY train_gan.py --data "${DATA}" --out "${GAN_OUT}" \
-  --epochs "${EPOCHS}" --batch-size "${BATCH}" --num-workers "${WORKERS}" --amp
+  --epochs "${EPOCHS}" --batch-size "${BATCH}" --num-workers "${WORKERS}" \
+  --amp --save-every "${SAVE_EVERY}"
 
 echo "== 3/4 训练 ConvVAE =="
+if [[ "${CLEAN}" == "1" && -d "${VAE_OUT}" ]]; then
+  echo "   CLEAN=1，删除旧目录 ${VAE_OUT}"
+  rm -rf "${VAE_OUT}"
+fi
 $PY train_vae.py --data "${DATA}" --out "${VAE_OUT}" \
   --epochs "${EPOCHS}" --batch-size "${BATCH}" --num-workers "${WORKERS}" \
-  --lr 1e-3 --amp --kl-warmup 5
+  --lr 1e-3 --amp --kl-warmup 5 --save-every "${SAVE_EVERY}"
 
 echo "== 4/4 评估 =="
+if [[ "${CLEAN}" == "1" && -d "${EVAL_OUT}" ]]; then
+  echo "   CLEAN=1，删除旧目录 ${EVAL_OUT}"
+  rm -rf "${EVAL_OUT}"
+fi
+EVAL_EXTRA=()
+[[ "${FID}" == "1" ]] && EVAL_EXTRA+=(--fid)
 $PY evaluate.py --data "${DATA}" --out "${EVAL_OUT}" \
   --gan "${GAN_OUT}" --vae "${VAE_OUT}" --num-workers "${WORKERS}" \
-  --n-samples 1024 --inversion-n 32 --inversion-steps 200
+  --n-samples "${EVAL_N}" --inversion-n "${INV_N}" \
+  --inversion-steps "${INV_STEPS}" ${EVAL_EXTRA[@]+"${EVAL_EXTRA[@]}"}
 
 echo "完成：结果见 ${EVAL_OUT}/report.md 与 ${EVAL_OUT}/compare_*.png"

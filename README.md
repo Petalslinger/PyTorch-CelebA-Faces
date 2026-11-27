@@ -350,6 +350,26 @@ FULL=1 bash run_all.sh     # 全量数据 + 30 epoch
 EPOCHS=50 BATCH=128 bash run_all.sh
 ```
 
+全部重训（先删除旧的 `runs/gan*`、`runs/vae*`、`runs/eval*` 再从头跑）：
+
+```bash
+CLEAN=1 FULL=1 bash run_all.sh
+```
+
+其余可用环境变量：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `EPOCHS` | 20（`FULL=1` 时 30） | 训练轮数 |
+| `BATCH` | 128 | batch size |
+| `WORKERS` | 4 | DataLoader 进程数，容器禁止多进程时设 0 |
+| `SAVE_EVERY` | 5 | 每几轮存一次 checkpoint（单份 70~90 MB） |
+| `CLEAN` | 0 | 1 表示训练前删除旧输出目录 |
+| `EVAL_N` | 2048 | 评估生成样本数 |
+| `INV_N` | 64 | GAN 反演图数量 |
+| `INV_STEPS` | 300 | 每张图的 z 优化步数 |
+| `FID` | 0 | 1 表示额外计算 FID |
+
 ### 4.3 收集结果
 
 训练与评估完成后，将产物整理成一个便于下载的压缩包：

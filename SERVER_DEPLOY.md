@@ -121,13 +121,17 @@ python train_vae.py --data /root/autodl-tmp/data/celeba64 \
 
 > 若数据已转换完毕，可用单条命令执行完整流程：
 > ```bash
-> ROOT=/root/autodl-pub/CelebA FULL=1 \
+> ROOT=/root/autodl-pub/CelebA FULL=1 CLEAN=1 FID=1 \
 >   DATA=/root/autodl-tmp/data/celeba64 \
 >   GAN_OUT=/root/autodl-tmp/runs/gan64 \
 >   VAE_OUT=/root/autodl-tmp/runs/vae64 \
 >   EVAL_OUT=/root/autodl-tmp/runs/eval64 \
 >   bash run_all.sh 2>&1 | tee /root/autodl-tmp/all.log
 > ```
+> `CLEAN=1` 会先删除三个旧输出目录，用于全部重训；
+> 不加则若目录已存在会沿用旧权重继续（`train_*.py` 只有在指定
+> `--resume` 时才续训，否则会覆盖 `last.pt`，但残留的 `epoch_*.pt`
+> 会与新结果混在一起，取回结果时容易混淆，因此重训建议加 `CLEAN=1`）。
 
 ### 步骤 8：评估
 
@@ -166,7 +170,7 @@ cd ~ && tar -xzf server_bundle.tar.gz && cd server
 bash smoke_test.sh && rm -rf _smoke
 tmux new -s celeba
 # —— 进入 tmux 会话后执行 ——
-ROOT=/root/autodl-pub/CelebA FULL=1 \
+ROOT=/root/autodl-pub/CelebA FULL=1 CLEAN=1 FID=1 \
   DATA=/root/autodl-tmp/data/celeba64 \
   GAN_OUT=/root/autodl-tmp/runs/gan64 \
   VAE_OUT=/root/autodl-tmp/runs/vae64 \
