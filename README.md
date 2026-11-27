@@ -5,7 +5,7 @@
 
 ```
 .
-├── prepare_data.py     # zip/文件夹 -> 统一尺寸的 .npy（含官方 train/val/test 划分）
+├── prepare_data.py     # 官方目录/zip/文件夹 -> 统一尺寸的 .npy（含官方 train/val/test 划分）
 ├── dataset.py          # Dataset / DataLoader（mmap 读取，[-1,1] 归一化）
 ├── utils.py            # seed、device、日志、EMA、checkpoint、网格图
 ├── metrics.py          # PSNR、SSIM（纯 torch）、最近邻配对
@@ -33,21 +33,64 @@ CPU 也能跑（64x64 的小网络），只是慢；默认自动选择 `cuda`。
 
 ## 1. 数据准备
 
-把 Kaggle 的 `archive.zip`（内含 `img_align_celeba/img_align_celeba/*.jpg` 和
-`list_eval_partition.csv`）放到项目根目录，然后：
+脚本支持三种数据来源，**AutoDL 公共数据集可以直接用**（无需解压、无需上传）。
 
-```bash
-# 完整转换，64x64（约 20 万张，16 进程大约 5~15 分钟）
-python prepare_data.py --zip archive.zip --out data/celeba64 --size 64
+### 1.1 AutoDL 公共数据集（推荐，服务器上用）
 
-# 快速试跑：只取 5000 张
-python prepare_data.py --zip archive.zip --out data/celeba64_5k --size 64 --max-images 5000
+AutoDL 的 `/root/autodl-pub/CelebA` 是官方目录结构：
+
+```
+CelebA/
+├── Anno/  list_attr_celeba.txt  list_bbox_celeba.txt  ...
+├── Eval/  list_eval_partition.txt          ← 官方 train/val/test 划分
+├── Img/
+│   ├── img_align_celeba.zip                ← 图片（未解压，脚本直接读）
+│   ├── img_align_celeba_png.7z*
+│   └── img_celeba.7z*
+└── README.txt
 ```
 
-输出 `data/celeba64/{train,val,test}.npy` + `meta.json` + `preview.png`。
-**先看 preview.png**，确认人脸是正的、没有黑边再训练。
+直接指定根目录即可，脚本会自动找到 `Img/img_align_celeba.zip` 和 `Eval/list_eval_partition.txt`：
 
-> 也可以直接用官方 `img_align_celeba` 文件夹：`--src ./img_align_celeba`。
+```bash
+# 先看一眼检测结果，不实际转换
+python prepare_data.py --root /root/autodl-pub/CelebA --out data/celeba64 --dry-run
+
+# 正式转换（zip 免解压直读，20 万张 16 进程约 5~15 分钟）
+python prepare_data.py --root /root/autodl-pub/CelebA --out data/celeba64 --size 64
+
+# 快速试跑：只取 5000 张
+python prepare_data.py --root /root/autodl-pub/CelebA --out data/celeba64_5k \
+    --size 64 --max-images 5000
+```
+
+> **不需要解压 `img_align_celeba.zip`**，脚本直接从压缩包里读 jpg，
+> 省 1.5 GB 磁盘和解压时间。`img_align_celeba.7z` / `img_celeba.7z` 脚本不支持，
+> 如果公共数据只有 7z，会打印解压命令。
+
+### 1.2 Kaggle 压缩包
+
+把 `archive.zip`（内含 `img_align_celeba/img_align_celeba/*.jpg` 和
+`list_eval_partition.csv`）放到项目根目录：
+
+```bash
+python prepare_data.py --zip archive.zip --out data/celeba64 --size 64
+```
+
+### 1.3 已解压的图片文件夹
+
+```bash
+python prepare_data.py --src ./img_align_celeba --out data/celeba64 --size 64
+# 如果划分表在别处，用 --partition 指定
+python prepare_data.py --src ./img_align_celeba \
+    --partition ./Eval/list_eval_partition.txt --out data/celeba64
+```
+
+### 输出
+
+`data/celeba64/{train,val,test}.npy` + `meta.json` + `preview.png`。
+**先看 preview.png**，确认人脸是正的、没有黑边再训练。
+没有官方划分表时会按 8:1:1 稳定哈希兜底（`meta.json` 里 `split_source` 会写明用了哪种）。
 
 ## 2. 训练
 

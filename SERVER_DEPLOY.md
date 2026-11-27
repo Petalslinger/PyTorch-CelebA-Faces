@@ -1,7 +1,11 @@
 # 服务器端运行包
 
 这个目录是**自包含**的：把整个 `server/` 上传到服务器，装好依赖就能直接跑，
-不需要 git，也不需要项目里的其他文件（`archive.zip` 和 `data/` 单独传）。
+不需要 git，也不需要项目里的其他文件。
+
+> **在 AutoDL 上**：如果公共数据集里已有 CelebA，那 `archive.zip` 和 `data/`
+> 都不用传，`prepare_data.py --root /root/autodl-pub/CelebA` 直接从
+> `/root/autodl-pub/CelebA/Img/img_align_celeba.zip` 读，见第 3 节方案 0。
 
 > ⚠️ 这个目录由项目根目录的 `pack_server.sh` 生成，**不要直接改里面的代码**。
 > 要改代码请改项目根目录的源文件，然后重新执行 `bash pack_server.sh`。
@@ -57,9 +61,37 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 
 `torch.cuda.is_available()` 必须是 `True`，否则正式训练会慢到不可接受。
 
-## 3. 准备数据（三选一）
+## 3. 准备数据（四选一）
 
-### 方案 A：传 zip，在服务器上转换（推荐，传输量最小）
+### 方案 0：直接用 AutoDL 公共数据集（最省事，推荐）
+
+AutoDL 的公共数据集已经挂载在 `/root/autodl-pub`（只读），CelebA 就在里面，
+官方目录结构：`Anno/ Eval/ Img/ README.txt`，其中
+`Img/img_align_celeba.zip` 是图片、`Eval/list_eval_partition.txt` 是官方划分。
+**不用上传、不用解压**，脚本直接从 zip 里读 jpg：
+
+```bash
+python prepare_data.py --root /root/autodl-pub/CelebA --out data/celeba64 --size 64
+```
+
+先 dry-run 确认检测到的路径对不对（不写文件）：
+
+```bash
+python prepare_data.py --root /root/autodl-pub/CelebA --out data/celeba64 --dry-run
+# [0/4] 扫描官方目录 /root/autodl-pub/CelebA ...
+#       图片源: 压缩包 Img/img_align_celeba.zip（无需解压，直接读）
+#       划分表: /root/autodl-pub/CelebA/Eval/list_eval_partition.txt
+#       共 202599 张图片
+```
+
+输出必须写到 **`/root/autodl-tmp`** 或数据盘，不要写到系统盘（30 G 会满）：
+
+```bash
+python prepare_data.py --root /root/autodl-pub/CelebA \
+    --out /root/autodl-tmp/data/celeba64 --size 64
+```
+
+### 方案 A：传 zip，在服务器上转换
 
 ```bash
 # 本地
@@ -86,6 +118,10 @@ scp -r data/celeba64 user@server:~/celeba/data/
 
 ```bash
 python prepare_data.py --src /path/to/img_align_celeba --out data/celeba64 --size 64
+
+# 划分表在别处时一起指定
+python prepare_data.py --src /path/to/img_align_celeba \
+    --partition /path/to/Eval/list_eval_partition.txt --out data/celeba64
 ```
 
 ### 转换完先看预览图
@@ -149,7 +185,19 @@ tail -f train.log        # Ctrl+C 只是停止查看，不影响训练
 bash run_all.sh                          # 5k 子集 + 20 epoch，快速看效果
 FULL=1 bash run_all.sh                   # 全量数据 + 30 epoch，正式结果
 EPOCHS=50 BATCH=128 FULL=1 bash run_all.sh
+
+# AutoDL 上用公共数据集，输出写到数据盘
+ROOT=/root/autodl-pub/CelebA FULL=1 \
+  DATA=/root/autodl-tmp/data/celeba64 \
+  GAN_OUT=/root/autodl-tmp/runs/gan64 \
+  VAE_OUT=/root/autodl-tmp/runs/vae64 \
+  EVAL_OUT=/root/autodl-tmp/runs/eval64 \
+  bash run_all.sh 2>&1 | tee train.log
 ```
+
+> `run_all.sh` 检测到 `/root/autodl-pub/CelebA` 存在时会自动用它，
+> 但**输出目录仍默认在项目内**，注意别把 2.5 GB 的 npy 和几个 G 的
+> checkpoint 写进只有 30 G 的系统盘。
 
 ### 想分开跑、中途调参
 
@@ -225,6 +273,15 @@ scp -r user@server:~/celeba/runs/eval ./runs_eval
 `--save-every 5` 减少检查点；`data/celeba64/*.npy` 用完可以删掉重新生成；
 `runs/*/epoch_*.pt` 只保留最后几个。
 
+**AutoDL：`/root/autodl-pub` 是只读的**
+公共数据集只读挂载，所以 `--out` 一定要指向 `/root/autodl-tmp/...`，
+否则会报 `Read-only file system` 或 `Permission denied`。
+
+**AutoDL：`Img/img_align_celeba.zip` 到底解不解压**
+不用解压。`--root /root/autodl-pub/CelebA` 会直接从 zip 里读，
+比先解压再转换省 1.5 GB 磁盘和一次全量 IO。只有 `img_align_celeba_png.7z`
+和 `img_celeba.7z` 是 7z 格式，脚本不支持，但也不用它们（zip 里就是同样的 jpg）。
+
 **生成结果全是噪声**
 先确认训练轮数够不够（GAN 至少 20~30 epoch 才有形状），
 再看 `runs/gan64/loss.csv` 里 D 和 G 的损失是否还在正常范围。
@@ -239,7 +296,7 @@ README 第 5 节的区间是 30 epoch 量级的经验值，实际受数据量、
 
 | 文件 | 作用 |
 | --- | --- |
-| `prepare_data.py` | zip/文件夹 → train/val/test.npy（官方划分） |
+| `prepare_data.py` | 官方目录/zip/文件夹 → train/val/test.npy（官方划分） |
 | `dataset.py` | Dataset / DataLoader 封装 |
 | `utils.py` | seed、device、EMA、checkpoint、日志 |
 | `metrics.py` | PSNR / SSIM（纯 torch）、最近邻配对 |
